@@ -113,24 +113,6 @@ be_session_leader()
   }
 }
 
-static void
-set_control_tty(int fd)
-{
-  if (ioctl(fd, TIOCSCTTY, 0) == -1) {
-    perror("ioctl(TIOCSCTTY)");
-    exit(EXIT_FAILURE);
-  }
-}
-
-static void
-set_foreground_pgid(int fd, pid_t pid)
-{
-  if (ioctl(fd, TIOCSPGRP, &pid) == -1) {
-    perror("ioctl(TIOCSPGRP)");
-    exit(EXIT_FAILURE);
-  }
-}
-
 // サイズ変更検出時のコールバック関数
 static int srcfd = -1;
 static int dstfd = -1;
@@ -199,6 +181,15 @@ int main(int argc, char * const argv[])
     perror("fork");
     exit(EXIT_FAILURE);
   case 0:
+    // マスタ端末は閉じる
+    if (close(mfd) == -1) {
+      perror("close");
+      exit(EXIT_FAILURE);
+    }
+
+    // このプロセスをセッションリーダーにする
+    be_session_leader();
+
     // スレーブ端末を開く
     sfd = open_slave();
 
@@ -208,17 +199,6 @@ int main(int argc, char * const argv[])
       copy_winsize(STDIN_FILENO, sfd);
     }
 
-    // マスタ端末は閉じる
-    if (close(mfd) == -1) {
-      perror("close");
-      exit(EXIT_FAILURE);
-    }
-    // このプロセスをセッションリーダーにする
-    be_session_leader();
-    // このプロセスの制御端末を開いたスレーブ端末にする
-    set_control_tty(sfd);
-    // 自分のPIDをフォアグラウンドプロセスグループとする
-    set_foreground_pgid(sfd, getpgrp());
     // 標準入力をスレーブ端末とする
     dup2(sfd, STDIN_FILENO);
     // 標準出力をスレーブ端末とする
