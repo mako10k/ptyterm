@@ -194,20 +194,20 @@ int main(int argc, char * const argv[])
 
   mfd = open_pty();
 
-  // スレーブ端末を開く
-  sfd = open_slave();
-
-  if (itty) {
-    // termios, winsizeを親と同一にする
-    copy_termios(STDIN_FILENO, sfd);
-    copy_winsize(STDIN_FILENO, sfd);
-  }
-
   switch (pid = fork()) {
   case -1:
     perror("fork");
     exit(EXIT_FAILURE);
   case 0:
+    // スレーブ端末を開く
+    sfd = open_slave();
+
+    if (itty) {
+      // termios, winsizeを親と同一にする
+      restore_termios(sfd);
+      copy_winsize(STDIN_FILENO, sfd);
+    }
+
     // マスタ端末は閉じる
     if (close(mfd) == -1) {
       perror("close");
@@ -242,10 +242,6 @@ int main(int argc, char * const argv[])
     }
     exit(EXIT_FAILURE);
   default:
-    if (close(sfd) == -1) {
-      perror("close");
-      exit(EXIT_FAILURE);
-    }
     if (itty) {
       struct termios termios;
       struct sigaction sigact;
