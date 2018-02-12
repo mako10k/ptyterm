@@ -228,9 +228,15 @@ int main(int argc, char * const argv[])
 
       // 親端末のキーボードシグナルを無効化、端末エコーを無効化、カノニカルモードを無効化
       termios = saved_termios;
-      termios.c_lflag &= ~ICANON & ~ECHO & ~ISIG;
-      if (ioctl(STDIN_FILENO, TCSETS, &termios) == -1) {
-        perror("ioctl(TCGETS)");
+      termios.c_lflag &= ~ICANON & ~ECHO & ~ISIG & ~IEXTEN;
+      termios.c_iflag &= ~BRKINT & ~ICRNL & ~INPCK & ~ISTRIP & ~IXON;
+      termios.c_cflag &= ~CSIZE & ~PARENB;
+      termios.c_cflag |= CS8;
+      termios.c_cc[VMIN] = 1;
+      termios.c_cc[VTIME] = 0;
+
+      if (ioctl(STDIN_FILENO, TCSETSF, &termios) == -1) {
+        perror("ioctl(TCSETSF)");
         exit(EXIT_FAILURE);
       }
 
