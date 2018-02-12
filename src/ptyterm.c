@@ -14,6 +14,9 @@
 #include <sys/select.h>
 #include <errno.h>
 #include <sys/wait.h>
+#include <getopt.h>
+
+#include "config.h"
 
 // プログラム終了時のコールバック関数
 static struct termios saved_termios;
@@ -145,6 +148,43 @@ int main(int argc, char * const argv[])
   int mfd, sfd;
   pid_t pid;
   int itty;
+  int argoffset;
+
+  for (;;) {
+    int c, optindex;
+    static struct option longopts[] = {
+      {"version", no_argument, NULL, 'V'},
+      {"help",    no_argument, NULL, 'h'},
+      {NULL,                0, NULL,   0}
+    };
+
+    c = getopt_long(argc, argv, "Vh", longopts, &optindex);
+    if (c == -1) break;
+
+    switch (c) {
+    case 'h':
+    case 'V':
+      printf("%s\n", PACKAGE_STRING);
+      if (c != 'h') exit(EXIT_SUCCESS);
+      printf("\n");
+      printf("Usage:\n");
+      printf("  %s -V\n", argv[0]);
+      printf("  %s -h\n", argv[0]);
+      printf("  %s [ENVNAME=ENVVALUE ..] [cmd [arg ..]]\n", argv[0]);
+      printf("\n");
+      printf("Options:\n");
+      printf("  -V, --version : print version\n");
+      printf("  -h, --help    : print this usage\n");
+      printf("\n");
+      exit(EXIT_SUCCESS);
+    default:
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  argoffset = optind;
+  while (argoffset < argc && index(argv[argoffset], '='))
+    putenv(argv[argoffset ++]);
 
   itty = isatty(STDIN_FILENO);
 
@@ -190,14 +230,14 @@ int main(int argc, char * const argv[])
       close(sfd);
     }
     // 引数をコマンドとして実行する
-    if (argc == 1) {
+    if (argc == argoffset) {
       char * const shell = getenv("SHELL");
       char * const argv_shell[] = { shell ?: "/bin/sh", NULL };
       
       execvp(argv_shell[0], argv_shell);
       perror(argv_shell[0]);
     } else {
-      execvp(argv[1], argv + 1);
+      execvp(argv[argoffset], argv + argoffset);
       perror(argv[1]);
     }
     exit(EXIT_FAILURE);
