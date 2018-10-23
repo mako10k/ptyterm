@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <sys/wait.h>
 #include <getopt.h>
+#include <locale.h>
 
 #include "config.h"
 
@@ -132,6 +133,7 @@ int main(int argc, char * const argv[])
   int itty;
   int argoffset;
 
+  setlocale(LC_ALL,"");
   for (;;) {
     int c, optindex;
     static struct option longopts[] = {

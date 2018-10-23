@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <sys/wait.h>
 #include <getopt.h>
+#include <locale.h>
 
 #include "config.h"
 
@@ -53,6 +54,7 @@ int main(int argc, char * const argv[])
   int argoffset;
   int opt_daemon = 0;
 
+  setlocale(LC_ALL, "");
   for (;;) {
     int c, optindex;
     static struct option longopts[] = {
@@ -128,8 +130,8 @@ int main(int argc, char * const argv[])
     }
     // 引数をコマンドとして実行する
     if (argc == argoffset) {
-      char * const argv_cat[] = { "/bin/cat" };
-      
+      char * const argv_cat[] = { "/bin/cat", NULL };
+
       execvp(argv_cat[0], argv_cat);
       perror(argv_cat[0]);
     } else {
