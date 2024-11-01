@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.69])
-AC_INIT([ptyterm], [0.9.0], [mako10k@mk10.org])
+AC_INIT([ptyterm],[0.9.0],[mako10k@mk10.org])
 AM_INIT_AUTOMAKE
 AC_CONFIG_SRCDIR([src])
 AC_CONFIG_HEADERS([config.h])
@@ -23,7 +23,7 @@ AC_TYPE_SSIZE_T
 
 # Checks for library functions.
 AC_FUNC_FORK
-AC_CHECK_FUNCS([atexit dup2 memmove select])
+AC_CHECK_FUNCS([atexit dup2 memmove putenv select strtol])
 
 AC_CONFIG_FILES([Makefile
                  src/Makefile])
