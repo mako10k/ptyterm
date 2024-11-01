@@ -74,6 +74,7 @@ open_slave ()
   return fd;
 }
 
+#if 0
 /// @brief termios をコピーする
 /// @param[in] srcfd コピー元のファイルディスクリプタ
 /// @param[in] dstfd コピー先のファイルディスクリプタ
@@ -93,6 +94,7 @@ copy_termios (int srcfd, int dstfd)
       exit (EXIT_FAILURE);
     }
 }
+#endif
 
   /// @brief カラム数
 static int opt_cols = -1;
