@@ -10,6 +10,13 @@
 			"packages": "autoconf, automake, libtool, pkg-config"
 		},
 		"ghcr.io/devcontainers/features/github-cli": {}
+	},
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"llvm-vs-code-extensions.vscode-clangd"
+			]
+		}
 	}
 
 	// Features to add to the dev container. More info: https://containers.dev/features.

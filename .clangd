@@ -1,0 +1,2 @@
+CompileFlags:
+  Add: [-Wall, -Werror, -I.., -I., -DHAVE_CONFIG_H]
