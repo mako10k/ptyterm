@@ -1,24 +1,22 @@
-#include <fcntl.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/select.h>
-#include <stdio.h>
 #include <errno.h>
-#include <string.h>
+#include <fcntl.h>
 #include <locale.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/select.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
-int
-main(int argc, char * const argv[])
-{
+int main(int argc, char *const argv[]) {
   int fd, max_fd, fd_count;
   fd_set rfds, wfds;
   char ibuf[8192], obuf[8192];
   size_t isiz = 0, osiz = 0;
   struct stat st;
   fd_set ofds;
-  char * filename = NULL;
+  char *filename = NULL;
 
   setlocale(LC_ALL, "");
   switch (argc) {
@@ -45,8 +43,9 @@ main(int argc, char * const argv[])
     perror("fstat");
     exit(EXIT_FAILURE);
   }
-  if (! S_ISCHR(st.st_mode) && ! S_ISSOCK(st.st_mode)) {
-    fprintf(stderr, "invalid input file (must be Character Device or Socket)\n");
+  if (!S_ISCHR(st.st_mode) && !S_ISSOCK(st.st_mode)) {
+    fprintf(stderr,
+            "invalid input file (must be Character Device or Socket)\n");
     exit(EXIT_FAILURE);
   }
   FD_ZERO(&ofds);
@@ -91,7 +90,8 @@ main(int argc, char * const argv[])
 
     fd_count = select(max_fd + 1, &rfds, &wfds, NULL, NULL);
     if (fd_count == -1) {
-      if (errno == EINTR) continue;
+      if (errno == EINTR)
+        continue;
       perror("select");
       exit(EXIT_FAILURE);
     }

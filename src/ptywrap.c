@@ -1,26 +1,24 @@
 #define _GNU_SOURCE
-#include <stdlib.h>
-#include <termios.h>
-#include <unistd.h>
-#include <stdio.h>
-#include <sys/ioctl.h>
-#include <pty.h>
-#include <signal.h>
-#include <string.h>
-#include <sys/signalfd.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <sys/select.h>
 #include <errno.h>
-#include <sys/wait.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <locale.h>
+#include <pty.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/select.h>
+#include <sys/signalfd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include "config.h"
 
-static int
-open_pty() {
+static int open_pty() {
   int fd;
 
   if ((fd = open("/dev/ptmx", O_RDWR)) == -1) {
@@ -38,17 +36,14 @@ open_pty() {
   return fd;
 }
 
-static void
-be_session_leader()
-{
+static void be_session_leader() {
   if (setsid() == -1) {
     perror("setsid");
     exit(EXIT_FAILURE);
   }
 }
 
-int main(int argc, char * const argv[])
-{
+int main(int argc, char *const argv[]) {
   int mfd;
   pid_t pid;
   int argoffset;
@@ -57,21 +52,21 @@ int main(int argc, char * const argv[])
   setlocale(LC_ALL, "");
   for (;;) {
     int c, optindex;
-    static struct option longopts[] = {
-      {"version", no_argument, NULL, 'V'},
-      {"help",    no_argument, NULL, 'h'},
-      {"daemon",  no_argument, NULL, 'd'},
-      {NULL,                0, NULL,   0}
-    };
+    static struct option longopts[] = {{"version", no_argument, NULL, 'V'},
+                                       {"help", no_argument, NULL, 'h'},
+                                       {"daemon", no_argument, NULL, 'd'},
+                                       {NULL, 0, NULL, 0}};
 
     c = getopt_long(argc, argv, "Vhd", longopts, &optindex);
-    if (c == -1) break;
+    if (c == -1)
+      break;
 
     switch (c) {
     case 'h':
     case 'V':
       printf("%s\n", PACKAGE_STRING);
-      if (c != 'h') exit(EXIT_SUCCESS);
+      if (c != 'h')
+        exit(EXIT_SUCCESS);
       printf("\n");
       printf("Usage:\n");
       printf("  %s -V\n", argv[0]);
@@ -94,7 +89,7 @@ int main(int argc, char * const argv[])
 
   argoffset = optind;
   while (argoffset < argc && index(argv[argoffset], '='))
-    putenv(argv[argoffset ++]);
+    putenv(argv[argoffset++]);
 
   mfd = open_pty();
   puts(ptsname(mfd));
@@ -130,7 +125,7 @@ int main(int argc, char * const argv[])
     }
     // 引数をコマンドとして実行する
     if (argc == argoffset) {
-      char * const argv_cat[] = { "/bin/cat", NULL };
+      char *const argv_cat[] = {"/bin/cat", NULL};
 
       execvp(argv_cat[0], argv_cat);
       perror(argv_cat[0]);
@@ -147,7 +142,8 @@ int main(int argc, char * const argv[])
         pid_t wpid;
 
         if ((wpid = wait(&status)) == -1) {
-          if (errno == EINTR) continue;
+          if (errno == EINTR)
+            continue;
           if (errno == ECHILD) {
             exit(status);
           }
