@@ -22,4 +22,6 @@ Makefile
 *.o
 .deps/
 
+src/biopen
 src/ptyterm
+src/ptywrap
