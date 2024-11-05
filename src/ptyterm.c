@@ -43,8 +43,10 @@ static void restore_termios(int fd) {
   }
 }
 
+static int g_ifd = -1;
+
 /// @brief プログラム終了時のコールバック関数
-static void restore_termios_handler() { restore_termios(STDIN_FILENO); }
+static void restore_termios_handler() { restore_termios(g_ifd); }
 
 /// @brief スレーブ端末名
 static char *slave_name = NULL;
@@ -174,6 +176,14 @@ int main(int argc, char *const argv[]) {
   /// @brief 引数のオフセット
   int argoffset;
 
+  int ifd = STDIN_FILENO;
+  int ofd = STDOUT_FILENO;
+  int efd = STDERR_FILENO;
+
+  const char *ifile = NULL;
+  const char *ofile = NULL;
+  const char *afile = NULL;
+
   setlocale(LC_ALL, "");
   while (1) {
     /// @brief オプション
@@ -185,12 +195,15 @@ int main(int argc, char *const argv[]) {
     /// @brief オプションの定義
     static struct option longopts[] = {{"version", no_argument, NULL, 'V'},
                                        {"help", no_argument, NULL, 'h'},
+                                       {"input", required_argument, NULL, 'i'},
+                                       {"output", required_argument, NULL, 'o'},
+                                       {"append", required_argument, NULL, 'a'},
                                        {"cols", required_argument, NULL, 'c'},
                                        {"lines", required_argument, NULL, 'l'},
                                        {NULL, 0, NULL, 0}};
 
     /// @brief オプションを取得する
-    opt = getopt_long(argc, argv, "Vhc:l:", longopts, &optindex);
+    opt = getopt_long(argc, argv, "Vhi:o:a:c:l:", longopts, &optindex);
     if (opt == -1)
       break;
 
@@ -207,10 +220,23 @@ int main(int argc, char *const argv[]) {
       printf("Options:\n");
       printf("  -c, --cols=N  : set columns\n");
       printf("  -l, --lines=N : set lines\n");
+      printf("  -i, --input=FILE : read from FILE instead of stdin\n");
+      printf("  -o, --output=FILE : write to FILE instead of stdout\n");
+      printf("  -a, --append=FILE : write to FILE instead of stdout with "
+             "append mode\n");
       printf("  -V, --version : print version and exit\n");
       printf("  -h, --help    : print this usage and exit\n");
       printf("\n");
       exit(EXIT_SUCCESS);
+    case 'i':
+      ifile = optarg;
+      break;
+    case 'o':
+      ofile = optarg;
+      break;
+    case 'a':
+      afile = optarg;
+      break;
     case 'c':
       opt_cols = strtol(optarg, &p, 0);
       if (optarg == p || *p != '\0' || opt_cols <= 0) {
@@ -230,16 +256,45 @@ int main(int argc, char *const argv[]) {
     }
   }
 
+  if (ofile && afile) {
+    fprintf(stderr, "output and append options are exclusive\n");
+    exit(EXIT_FAILURE);
+  }
+
   /// @brief 環境変数を設定する
   argoffset = optind;
   /// @brief 環境変数を設定する
   while (argoffset < argc && index(argv[argoffset], '='))
     putenv(argv[argoffset++]);
 
+  if (ifile && strcmp(ifile, "-") != 0) {
+    ifd = open(ifile, O_RDONLY);
+    if (ifd == -1) {
+      perror(ifile);
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  if (ofile && strcmp(ofile, "-") != 0) {
+    ofd = open(ofile, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (ofd == -1) {
+      perror(ofile);
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  if (afile) {
+    ofd = open(afile, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (ofd == -1) {
+      perror(afile);
+      exit(EXIT_FAILURE);
+    }
+  }
+
   /// @brief 標準入力が端末かどうか
-  itty = isatty(STDIN_FILENO);
+  itty = isatty(ifd);
   if (itty) {
-    save_termios(STDIN_FILENO);
+    save_termios(ifd);
   }
 
   // 擬似端末を開く
@@ -267,7 +322,7 @@ int main(int argc, char *const argv[]) {
     if (itty) {
       // termios, winsizeを親と同一にする
       restore_termios(sfd);
-      copy_winsize(STDIN_FILENO, sfd);
+      copy_winsize(ifd, sfd);
     } else if (opt_cols > 0 || opt_lines > 0) {
       if (opt_cols <= 0) {
         fprintf(stderr, "cols is not set with lines for notty inputs\n");
@@ -285,13 +340,13 @@ int main(int argc, char *const argv[]) {
     }
 
     // 標準入力をスレーブ端末とする
-    dup2(sfd, STDIN_FILENO);
+    dup2(sfd, ifd);
     // 標準出力をスレーブ端末とする
-    dup2(sfd, STDOUT_FILENO);
+    dup2(sfd, ofd);
     // 標準エラー出力をスレーブ端末とする
-    dup2(sfd, STDERR_FILENO);
+    dup2(sfd, efd);
     // スレーブ端末は閉じる
-    if (sfd != STDIN_FILENO && sfd != STDOUT_FILENO && sfd != STDERR_FILENO) {
+    if (sfd != ifd && sfd != ofd && sfd != efd) {
       close(sfd);
     }
     // 引数をコマンドとして実行する
@@ -320,14 +375,15 @@ int main(int argc, char *const argv[]) {
       termios.c_cc[VMIN] = 1;
       termios.c_cc[VTIME] = 0;
 
-      if (ioctl(STDIN_FILENO, TCSETSF, &termios) == -1) {
+      if (ioctl(ifd, TCSETSF, &termios) == -1) {
         perror("ioctl(TCSETSF)");
         exit(EXIT_FAILURE);
       }
 
       // プログラム終了時に元に戻す
+      g_ifd = ifd;
       atexit(restore_termios_handler);
-      srcfd = STDIN_FILENO;
+      srcfd = ifd;
       dstfd = mfd;
 
       sigact.sa_handler = size_changed;
@@ -366,16 +422,16 @@ int main(int argc, char *const argv[]) {
       // 標準入力 -> 擬似端末
       // 用のバッファに空きがあれば読出可能かチェック対象とする
       if (siz2 < sizeof(buf2)) {
-        FD_SET(STDIN_FILENO, &rfds);
-        if (maxfd < STDIN_FILENO)
-          maxfd = STDIN_FILENO;
+        FD_SET(ifd, &rfds);
+        if (maxfd < ifd)
+          maxfd = ifd;
       }
       // 擬似端末 -> 標準出力
       // 用のバッファにデータがあれば書込可能かチェック対象とする
       if (siz1 > 0) {
-        FD_SET(STDOUT_FILENO, &wfds);
-        if (maxfd < STDOUT_FILENO)
-          maxfd = STDOUT_FILENO;
+        FD_SET(ofd, &wfds);
+        if (maxfd < ofd)
+          maxfd = ofd;
       }
 
       // 読み書き状態をチェックする
@@ -400,8 +456,8 @@ int main(int argc, char *const argv[]) {
       }
 
       // 標準出力に書込
-      if (FD_ISSET(STDOUT_FILENO, &wfds)) {
-        ssize_t siz = write(STDOUT_FILENO, buf1, siz1);
+      if (FD_ISSET(ofd, &wfds)) {
+        ssize_t siz = write(ofd, buf1, siz1);
         if (siz == -1) {
           perror("write");
           exit(EXIT_FAILURE);
@@ -450,8 +506,8 @@ int main(int argc, char *const argv[]) {
       }
 
       // 標準入力から読出
-      if (FD_ISSET(STDIN_FILENO, &rfds)) {
-        ssize_t siz = read(STDIN_FILENO, buf2 + siz2, sizeof(buf2) - siz2);
+      if (FD_ISSET(ifd, &rfds)) {
+        ssize_t siz = read(ifd, buf2 + siz2, sizeof(buf2) - siz2);
         if (siz == -1) {
           perror("read");
           exit(EXIT_FAILURE);
