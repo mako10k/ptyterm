@@ -287,7 +287,7 @@ int main(int argc, char *const argv[]) {
     ofd = open(afile, O_WRONLY | O_CREAT | O_APPEND, 0666);
     if (ofd == -1) {
       perror(afile);
-      exit(EXIT_FAILURE);
+      exit(EXIT_FAILURE); 
     }
   }
 
@@ -351,8 +351,8 @@ int main(int argc, char *const argv[]) {
     }
     // 引数をコマンドとして実行する
     if (argc == argoffset) {
-      char *const shell = getenv("SHELL");
-      char *const argv_shell[] = {shell ?: "/bin/sh", NULL};
+      char *const shell = getenv("SHELL") ?: "/bin/sh";
+      char *const argv_shell[] = {shell, NULL};
 
       execvp(argv_shell[0], argv_shell);
       perror(argv_shell[0]);
