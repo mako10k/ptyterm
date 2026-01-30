@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool pkg-config
+
+      - name: Bootstrap
+        run: sh ./bootstrap.sh
+
+      - name: Configure
+        run: ./configure
+
+      - name: Build
+        run: make -j"$(nproc)"
+
+      - name: Test
+        run: make check
+
+      - name: Distcheck (optional)
+        if: github.event_name == 'push'
+        run: |
+          if make -n distcheck >/dev/null 2>&1; then
+            make distcheck
+          else
+            echo "distcheck target not available; skipping"
+          fi

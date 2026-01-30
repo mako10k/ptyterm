@@ -18,6 +18,7 @@ Makefile.in
 Makefile
 
 *.log
+*.trs
 *~
 *.o
 .deps/

@@ -75,7 +75,7 @@ int pbuf(int ifd, int ofd, size_t bufsize) {
     }
 
     // Read from input
-    if (FD_ISSET(ifd, &rfds)) {
+    if (ifd >= 0 && FD_ISSET(ifd, &rfds)) {
       ssize_t siz;
 
       if (pos == 0 || pos + len >= bufsize) {
@@ -107,7 +107,7 @@ int pbuf(int ifd, int ofd, size_t bufsize) {
     }
 
     // Write to output
-    if (FD_ISSET(ofd, &wfds)) {
+    if (ofd >= 0 && FD_ISSET(ofd, &wfds)) {
       ssize_t siz;
 
       if (pos + len < bufsize) {

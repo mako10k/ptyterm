@@ -3,7 +3,7 @@
 
 AC_PREREQ([2.71])
 AC_INIT([ptyterm],[0.9.0],[mako10k@mk10.org])
-AM_INIT_AUTOMAKE
+AM_INIT_AUTOMAKE([foreign])
 AC_CONFIG_SRCDIR([src])
 AC_CONFIG_HEADERS([config.h])
 AC_USE_SYSTEM_EXTENSIONS
