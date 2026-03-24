@@ -4,6 +4,8 @@
 #define PACKAGE_STRING "ptyterm"
 #endif
 
+#include "ptyterm-control.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -21,6 +23,172 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+
+static int print_list_response(const void *payload, size_t payload_size) {
+  const struct ptyterm_list_response *response;
+  const struct ptyterm_session_summary *summary;
+  size_t expected_size;
+  uint32_t i;
+
+  if (payload_size < sizeof(*response)) {
+    fprintf(stderr, "invalid list response\n");
+    return EXIT_FAILURE;
+  }
+
+  response = payload;
+  expected_size = sizeof(*response) +
+                  response->session_count * sizeof(struct ptyterm_session_summary);
+  if (payload_size != expected_size) {
+    fprintf(stderr, "invalid list response size\n");
+    return EXIT_FAILURE;
+  }
+
+  if (response->session_count == 0) {
+    printf("no sessions\n");
+    return EXIT_SUCCESS;
+  }
+
+  summary = (const struct ptyterm_session_summary *)(response + 1);
+  for (i = 0; i < response->session_count; ++i) {
+    printf("%u\t%s\t%d\t%s\n", summary[i].id,
+           ptyterm_session_state_name(summary[i].state), summary[i].child_pid,
+           summary[i].command);
+  }
+  return EXIT_SUCCESS;
+}
+
+static int run_list_client(const char *socket_path, int session_id) {
+  char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
+  char payload[4096];
+  struct ptyterm_list_request request;
+  struct ptyterm_message_header header;
+  ssize_t payload_size;
+  int fd;
+
+  if (socket_path == NULL) {
+    if (ptyterm_default_socket_path(default_socket_path,
+                                    sizeof(default_socket_path)) == -1) {
+      perror("default socket path");
+      return EXIT_FAILURE;
+    }
+    socket_path = default_socket_path;
+  }
+
+  fd = ptyterm_connect_socket(socket_path);
+  if (fd == -1) {
+    perror(socket_path);
+    return EXIT_FAILURE;
+  }
+
+  request.session_id = session_id;
+  if (ptyterm_send_message(fd, PTYTERM_MESSAGE_LIST_REQUEST, &request,
+                           sizeof(request)) == -1) {
+    perror("send");
+    close(fd);
+    return EXIT_FAILURE;
+  }
+
+  payload_size = ptyterm_recv_message(fd, &header, payload, sizeof(payload));
+  if (payload_size == -1) {
+    perror("recv");
+    close(fd);
+    return EXIT_FAILURE;
+  }
+
+  close(fd);
+  switch (header.type) {
+  case PTYTERM_MESSAGE_LIST_RESPONSE:
+    return print_list_response(payload, (size_t)payload_size);
+  case PTYTERM_MESSAGE_ERROR: {
+    const struct ptyterm_error_response *response;
+
+    if ((size_t)payload_size < sizeof(*response)) {
+      fprintf(stderr, "short error response\n");
+      return EXIT_FAILURE;
+    }
+    response = (const struct ptyterm_error_response *)payload;
+    fprintf(stderr, "%s\n", response->message);
+    return EXIT_FAILURE;
+  }
+  default:
+    fprintf(stderr, "unexpected response type: %u\n", header.type);
+    return EXIT_FAILURE;
+  }
+}
+
+static int run_buffer_info_client(const char *socket_path, int session_id) {
+  char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
+  char payload[4096];
+  struct ptyterm_buffer_info_request request;
+  struct ptyterm_message_header header;
+  ssize_t payload_size;
+  int fd;
+
+  if (socket_path == NULL) {
+    if (ptyterm_default_socket_path(default_socket_path,
+                                    sizeof(default_socket_path)) == -1) {
+      perror("default socket path");
+      return EXIT_FAILURE;
+    }
+    socket_path = default_socket_path;
+  }
+
+  fd = ptyterm_connect_socket(socket_path);
+  if (fd == -1) {
+    perror(socket_path);
+    return EXIT_FAILURE;
+  }
+
+  request.session_id = session_id;
+  if (ptyterm_send_message(fd, PTYTERM_MESSAGE_BUFFER_INFO_REQUEST, &request,
+                           sizeof(request)) == -1) {
+    perror("send");
+    close(fd);
+    return EXIT_FAILURE;
+  }
+
+  payload_size = ptyterm_recv_message(fd, &header, payload, sizeof(payload));
+  if (payload_size == -1) {
+    perror("recv");
+    close(fd);
+    return EXIT_FAILURE;
+  }
+
+  close(fd);
+  switch (header.type) {
+  case PTYTERM_MESSAGE_BUFFER_INFO_RESPONSE: {
+    const struct ptyterm_buffer_info_response *response;
+
+    if ((size_t)payload_size != sizeof(*response)) {
+      fprintf(stderr, "invalid buffer-info response size\n");
+      return EXIT_FAILURE;
+    }
+
+    response = (const struct ptyterm_buffer_info_response *)payload;
+    printf("id=%u\n", response->id);
+    printf("state=%s\n", ptyterm_session_state_name(response->state));
+    printf("buffer_capacity=%u\n", response->buffer_capacity);
+    printf("buffer_used=%u\n", response->buffer_used);
+    printf("dropped_bytes=%u\n", response->dropped_bytes);
+    printf("paused_on_full=%u\n", response->paused_on_full);
+    return EXIT_SUCCESS;
+  }
+  case PTYTERM_MESSAGE_ERROR: {
+    const struct ptyterm_error_response *response;
+
+    if ((size_t)payload_size < sizeof(*response)) {
+      fprintf(stderr, "short error response\n");
+      return EXIT_FAILURE;
+    }
+    response = (const struct ptyterm_error_response *)payload;
+    fprintf(stderr, "%s\n", response->message);
+    return EXIT_FAILURE;
+  }
+  default:
+    fprintf(stderr, "unexpected response type: %u\n", header.type);
+    return EXIT_FAILURE;
+  }
+}
 
 /// @brief 端末の termios を保存場所
 static struct termios saved_termios;
@@ -183,6 +351,10 @@ int main(int argc, char *const argv[]) {
   const char *ifile = NULL;
   const char *ofile = NULL;
   const char *afile = NULL;
+  const char *socket_path = NULL;
+  int buffer_info_requested = 0;
+  int list_requested = 0;
+  int session_id = PTYTERM_SESSION_ALL;
 
   setlocale(LC_ALL, "");
   while (1) {
@@ -195,6 +367,10 @@ int main(int argc, char *const argv[]) {
     /// @brief オプションの定義
     static struct option longopts[] = {{"version", no_argument, NULL, 'V'},
                        {"help", no_argument, NULL, 'h'},
+                       {"socket", required_argument, NULL, 's'},
+                       {"buffer-info", no_argument, NULL, 'B'},
+                       {"list", no_argument, NULL, 'L'},
+                       {"session", required_argument, NULL, 'S'},
                        {"stdin", required_argument, NULL, 'i'},
                        {"input", required_argument, NULL, 'i'},
                        {"stdout", required_argument, NULL, 'o'},
@@ -207,7 +383,7 @@ int main(int argc, char *const argv[]) {
                        {NULL, 0, NULL, 0}};
 
     /// @brief オプションを取得する
-    opt = getopt_long(argc, argv, "Vhi:o:a:c:l:", longopts, &optindex);
+    opt = getopt_long(argc, argv, "Vhs:BLi:o:a:c:l:S:", longopts, &optindex);
     if (opt == -1)
       break;
 
@@ -231,11 +407,26 @@ int main(int argc, char *const argv[]) {
       printf("  -a, --stdout-append=FILE : append output to FILE instead "
              "of stdout (alias: --append)\n");
       printf("\n");
+      printf("Management options:\n");
+      printf("  -L, --list          : list daemon-managed sessions\n");
+      printf("  -B, --buffer-info   : show buffer state for one session\n");
+      printf("      --session=ID    : select one session for management operations\n");
+      printf("  -s, --socket=PATH   : override daemon control socket path\n");
+      printf("\n");
       printf("Common options:\n");
       printf("  -V, --version : print version and exit\n");
       printf("  -h, --help    : print this usage and exit\n");
       printf("\n");
       exit(EXIT_SUCCESS);
+    case 's':
+      socket_path = optarg;
+      break;
+    case 'L':
+      list_requested = 1;
+      break;
+    case 'B':
+      buffer_info_requested = 1;
+      break;
     case 'i':
       ifile = optarg;
       break;
@@ -259,6 +450,13 @@ int main(int argc, char *const argv[]) {
         exit(EXIT_FAILURE);
       }
       break;
+    case 'S':
+      session_id = strtol(optarg, &p, 0);
+      if (optarg == p || *p != '\0' || session_id <= 0) {
+        fprintf(stderr, "invalid session: %s\n", optarg);
+        exit(EXIT_FAILURE);
+      }
+      break;
     default:
       exit(EXIT_FAILURE);
     }
@@ -267,6 +465,30 @@ int main(int argc, char *const argv[]) {
   if (ofile && afile) {
     fprintf(stderr, "output and append options are exclusive\n");
     exit(EXIT_FAILURE);
+  }
+
+  if (list_requested && buffer_info_requested) {
+    fprintf(stderr, "select only one management operation\n");
+    exit(EXIT_FAILURE);
+  }
+
+  if (list_requested || buffer_info_requested) {
+    if (ifile || ofile || afile || opt_cols > 0 || opt_lines > 0) {
+      fprintf(stderr, "run options are not supported with management operations\n");
+      exit(EXIT_FAILURE);
+    }
+    if (optind != argc) {
+      fprintf(stderr,
+              "management operations do not accept environment or command arguments\n");
+      exit(EXIT_FAILURE);
+    }
+    if (list_requested)
+      return run_list_client(socket_path, session_id);
+    if (session_id == PTYTERM_SESSION_ALL) {
+      fprintf(stderr, "--buffer-info requires --session=ID\n");
+      exit(EXIT_FAILURE);
+    }
+    return run_buffer_info_client(socket_path, session_id);
   }
 
   /// @brief 環境変数を設定する
