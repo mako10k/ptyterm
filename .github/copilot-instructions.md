@@ -1,18 +1,8 @@
-# Copilot instructions for ptyterm
+# Project Guidelines
 
-## Build / test / lint
+## Build and Test
 
-This repo uses GNU Autotools (autoconf/automake).
-
-Configure + build (in-tree):
-
-```sh
-./bootstrap.sh
-./configure
-make
-```
-
-Out-of-tree build (useful to keep the repo clean):
+This repository uses GNU Autotools. Prefer an out-of-tree build to keep generated files isolated:
 
 ```sh
 ./bootstrap.sh
@@ -21,43 +11,31 @@ mkdir -p build && cd build
 make
 ```
 
-Useful targets:
+In-tree builds are also supported with `./bootstrap.sh && ./configure && make`.
 
-```sh
-make clean
-make install   # uses standard DESTDIR/prefix from ./configure
-```
+- Run the full test suite with `make check` after building.
+- Run a single test with `make -C src check TESTS=test-pbuf-copy.sh`.
+- Use `make distcheck` when changing build or packaging behavior.
+- There is no separate lint target; compilation is the lint gate because [src/Makefile.am](../src/Makefile.am) enables `-Wall -Werror`.
+- Generate `config.h` via `configure` before relying on editor tooling that expects `HAVE_CONFIG_H`.
 
-Tests:
+See [README.md](../README.md) for user-facing build and usage examples.
 
-- `make check` runs a small POSIX-sh test suite (see `src/test-*.sh`).
-- Run a single test: `make -C src check TESTS=test-pbuf-copy.sh`
+## Architecture
 
-Distribution sanity check:
+This project is a small set of standalone C utilities under [src](../src):
 
-```sh
-make distcheck
-```
+- `ptyterm`: interactive PTY wrapper that runs a command on a slave PTY and forwards I/O while mirroring window size changes.
+- `ptywrap`: allocates a PTY, prints the slave path, and forks a command with stdio attached to the PTY master.
+- `biopen`: bidirectional relay between stdin/stdout and a character device or socket opened read-write.
+- `pbuf`: buffered stdin-to-stdout copier built around a ring-buffer style implementation with `readv(2)` and `writev(2)`.
 
-Linting:
+The binaries are intentionally simple and mostly live in one source file each. Keep changes local to the relevant utility unless behavior is genuinely shared.
 
-- No dedicated lint target; compilation is treated as a lint gate because `src/Makefile.am` builds with `-Wall -Werror`.
-- Autotools defines `-DHAVE_CONFIG_H` via `DEFS` during builds; for clangd, `.clangd` also adds it. Generate `config.h` first via `./configure`.
+## Conventions
 
-## High-level architecture
-
-This is a small collection of C utilities around PTYs and stream forwarding, built as separate binaries from `src/`:
-
-- **`ptyterm`** (`src/ptyterm.c`): interactive PTY “terminal wrapper”. It creates a PTY master/slave, optionally rewires stdin/stdout/stderr, forwards I/O with `select(2)`, and mirrors window size changes (SIGWINCH) to the slave.
-- **`ptywrap`** (`src/ptywrap.c`): prints the allocated PTY slave path (`ptsname`) and forks/execs a command (defaults to `/bin/cat`) with its stdio attached to the PTY master; supports a daemon mode that redirects stderr to `/dev/null`.
-- **`biopen`** (`src/biopen.c`): bidirectional relay between stdin/stdout and a character device/socket opened read-write (defaults to `ttyname(stdin)`), using `select(2)` and internal buffers.
-- **`pbuf`** (`src/pbuf.c`): buffered copy utility (`stdin` → `stdout`) with selectable buffer size and an internal ring-buffer-like implementation using `readv/writev`.
-
-The build wiring is straightforward: top-level `Makefile.am` builds the `src` subdir; `src/Makefile.am` declares the four programs and their single-file sources.
-
-## Key conventions in this codebase
-
-- **Autotools config header**: Sources typically include `config.h` when `HAVE_CONFIG_H` is defined; keep feature checks and portability bits in `configure.ac`/`config.h` rather than ad-hoc `#ifdef`s.
-- **Error handling style**: Most utilities treat system call failures as fatal and immediately `perror()` + `exit(EXIT_FAILURE)` (or return `-1` in library-like helpers such as `pbuf()`).
-- **I/O multiplexing**: Data movement is generally done with `select(2)` and explicit FD sets; when extending I/O paths, follow the existing “build FD sets → select → handle one ready case → continue” loop pattern.
-- **Locale**: Each `main()` calls `setlocale(LC_ALL, "")`; keep user-facing messages compatible with that assumption.
+- Follow the existing Autotools portability pattern: include `config.h` behind `HAVE_CONFIG_H`, and add feature checks in [configure.ac](../configure.ac) instead of ad-hoc platform `#ifdef`s.
+- Match the current error-handling style: system call failures are usually fatal in `main()` paths and reported with `perror()` plus `EXIT_FAILURE`.
+- Preserve the current I/O model: these tools use `select(2)` with explicit `fd_set` management rather than introducing a different event mechanism.
+- Keep `setlocale(LC_ALL, "")` in `main()` functions so help text and diagnostics stay locale-aware.
+- Tests in [src](../src) are small POSIX shell scripts that exercise built binaries, so behavior changes should usually be covered by extending or adding a `test-*.sh` script.
