@@ -39,3 +39,4 @@ The binaries are intentionally simple and mostly live in one source file each. K
 - Preserve the current I/O model: these tools use `select(2)` with explicit `fd_set` management rather than introducing a different event mechanism.
 - Keep `setlocale(LC_ALL, "")` in `main()` functions so help text and diagnostics stay locale-aware.
 - Tests in [src](../src) are small POSIX shell scripts that exercise built binaries, so behavior changes should usually be covered by extending or adding a `test-*.sh` script.
+- Prefer English for source code, comments, diagnostics, tests, and documentation unless a file already has a different established language.
