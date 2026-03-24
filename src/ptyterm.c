@@ -194,13 +194,17 @@ int main(int argc, char *const argv[]) {
     char *p;
     /// @brief オプションの定義
     static struct option longopts[] = {{"version", no_argument, NULL, 'V'},
-                                       {"help", no_argument, NULL, 'h'},
-                                       {"input", required_argument, NULL, 'i'},
-                                       {"output", required_argument, NULL, 'o'},
-                                       {"append", required_argument, NULL, 'a'},
-                                       {"cols", required_argument, NULL, 'c'},
-                                       {"lines", required_argument, NULL, 'l'},
-                                       {NULL, 0, NULL, 0}};
+                       {"help", no_argument, NULL, 'h'},
+                       {"stdin", required_argument, NULL, 'i'},
+                       {"input", required_argument, NULL, 'i'},
+                       {"stdout", required_argument, NULL, 'o'},
+                       {"output", required_argument, NULL, 'o'},
+                       {"stdout-append", required_argument, NULL,
+                      'a'},
+                       {"append", required_argument, NULL, 'a'},
+                       {"cols", required_argument, NULL, 'c'},
+                       {"lines", required_argument, NULL, 'l'},
+                       {NULL, 0, NULL, 0}};
 
     /// @brief オプションを取得する
     opt = getopt_long(argc, argv, "Vhi:o:a:c:l:", longopts, &optindex);
@@ -220,10 +224,12 @@ int main(int argc, char *const argv[]) {
       printf("Options:\n");
       printf("  -c, --cols=N  : set columns\n");
       printf("  -l, --lines=N : set lines\n");
-      printf("  -i, --input=FILE : read from FILE instead of stdin\n");
-      printf("  -o, --output=FILE : write to FILE instead of stdout\n");
-      printf("  -a, --append=FILE : write to FILE instead of stdout with "
-             "append mode\n");
+            printf("  -i, --stdin=FILE : read from FILE instead of stdin "
+              "(alias: --input)\n");
+            printf("  -o, --stdout=FILE : write to FILE instead of stdout "
+              "(alias: --output)\n");
+            printf("  -a, --stdout-append=FILE : append output to FILE instead "
+              "of stdout (alias: --append)\n");
       printf("  -V, --version : print version and exit\n");
       printf("  -h, --help    : print this usage and exit\n");
       printf("\n");

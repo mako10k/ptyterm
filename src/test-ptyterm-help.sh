@@ -11,3 +11,9 @@ printf '%s\n' "$out" | grep -q "Usage" || {
   printf '%s\n' "$out" >&2
   exit 1
 }
+
+printf '%s\n' "$out" | grep -q -- "--stdin=FILE" || {
+  echo "ptyterm -h: expected canonical --stdin option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
