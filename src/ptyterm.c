@@ -190,6 +190,93 @@ static int run_buffer_info_client(const char *socket_path, int session_id) {
   }
 }
 
+static int run_create_client(const char *socket_path, int cmd_argc,
+                             char *const cmd_argv[]) {
+  char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
+  char payload[4096];
+  struct ptyterm_create_request *request;
+  struct ptyterm_message_header header;
+  ssize_t payload_size;
+  size_t offset;
+  int fd;
+  int i;
+
+  if (socket_path == NULL) {
+    if (ptyterm_default_socket_path(default_socket_path,
+                                    sizeof(default_socket_path)) == -1) {
+      perror("default socket path");
+      return EXIT_FAILURE;
+    }
+    socket_path = default_socket_path;
+  }
+
+  request = (struct ptyterm_create_request *)payload;
+  request->argc = (uint32_t)cmd_argc;
+  offset = sizeof(*request);
+  for (i = 0; i < cmd_argc; ++i) {
+    size_t arg_size;
+
+    arg_size = strlen(cmd_argv[i]) + 1;
+    if (offset + arg_size > sizeof(payload)) {
+      fprintf(stderr, "create request too large\n");
+      return EXIT_FAILURE;
+    }
+    memcpy(payload + offset, cmd_argv[i], arg_size);
+    offset += arg_size;
+  }
+
+  fd = ptyterm_connect_socket(socket_path);
+  if (fd == -1) {
+    perror(socket_path);
+    return EXIT_FAILURE;
+  }
+
+  if (ptyterm_send_message(fd, PTYTERM_MESSAGE_CREATE_REQUEST, payload,
+                           (uint32_t)offset) == -1) {
+    perror("send");
+    close(fd);
+    return EXIT_FAILURE;
+  }
+
+  payload_size = ptyterm_recv_message(fd, &header, payload, sizeof(payload));
+  if (payload_size == -1) {
+    perror("recv");
+    close(fd);
+    return EXIT_FAILURE;
+  }
+
+  close(fd);
+  switch (header.type) {
+  case PTYTERM_MESSAGE_CREATE_RESPONSE: {
+    const struct ptyterm_create_response *response;
+
+    if ((size_t)payload_size != sizeof(*response)) {
+      fprintf(stderr, "invalid create response size\n");
+      return EXIT_FAILURE;
+    }
+    response = (const struct ptyterm_create_response *)payload;
+    printf("session_id=%u\n", response->session_id);
+    printf("state=%s\n", ptyterm_session_state_name(response->state));
+    printf("child_pid=%d\n", response->child_pid);
+    return EXIT_SUCCESS;
+  }
+  case PTYTERM_MESSAGE_ERROR: {
+    const struct ptyterm_error_response *response;
+
+    if ((size_t)payload_size < sizeof(*response)) {
+      fprintf(stderr, "short error response\n");
+      return EXIT_FAILURE;
+    }
+    response = (const struct ptyterm_error_response *)payload;
+    fprintf(stderr, "%s\n", response->message);
+    return EXIT_FAILURE;
+  }
+  default:
+    fprintf(stderr, "unexpected response type: %u\n", header.type);
+    return EXIT_FAILURE;
+  }
+}
+
 /// @brief 端末の termios を保存場所
 static struct termios saved_termios;
 
@@ -353,6 +440,7 @@ int main(int argc, char *const argv[]) {
   const char *afile = NULL;
   const char *socket_path = NULL;
   int buffer_info_requested = 0;
+  int create_requested = 0;
   int list_requested = 0;
   int session_id = PTYTERM_SESSION_ALL;
 
@@ -367,6 +455,7 @@ int main(int argc, char *const argv[]) {
     /// @brief オプションの定義
     static struct option longopts[] = {{"version", no_argument, NULL, 'V'},
                        {"help", no_argument, NULL, 'h'},
+                       {"create", no_argument, NULL, 'C'},
                        {"socket", required_argument, NULL, 's'},
                        {"buffer-info", no_argument, NULL, 'B'},
                        {"list", no_argument, NULL, 'L'},
@@ -383,7 +472,7 @@ int main(int argc, char *const argv[]) {
                        {NULL, 0, NULL, 0}};
 
     /// @brief オプションを取得する
-    opt = getopt_long(argc, argv, "Vhs:BLi:o:a:c:l:S:", longopts, &optindex);
+    opt = getopt_long(argc, argv, "+VhCs:BLi:o:a:c:l:S:", longopts, &optindex);
     if (opt == -1)
       break;
 
@@ -408,6 +497,7 @@ int main(int argc, char *const argv[]) {
              "of stdout (alias: --append)\n");
       printf("\n");
       printf("Management options:\n");
+      printf("  -C, --create        : create a daemon-managed session\n");
       printf("  -L, --list          : list daemon-managed sessions\n");
       printf("  -B, --buffer-info   : show buffer state for one session\n");
       printf("      --session=ID    : select one session for management operations\n");
@@ -418,6 +508,9 @@ int main(int argc, char *const argv[]) {
       printf("  -h, --help    : print this usage and exit\n");
       printf("\n");
       exit(EXIT_SUCCESS);
+    case 'C':
+      create_requested = 1;
+      break;
     case 's':
       socket_path = optarg;
       break;
@@ -467,20 +560,29 @@ int main(int argc, char *const argv[]) {
     exit(EXIT_FAILURE);
   }
 
-  if (list_requested && buffer_info_requested) {
+  if ((create_requested != 0) + (list_requested != 0) +
+          (buffer_info_requested != 0) >
+      1) {
     fprintf(stderr, "select only one management operation\n");
     exit(EXIT_FAILURE);
   }
 
-  if (list_requested || buffer_info_requested) {
+  if (create_requested || list_requested || buffer_info_requested) {
     if (ifile || ofile || afile || opt_cols > 0 || opt_lines > 0) {
       fprintf(stderr, "run options are not supported with management operations\n");
       exit(EXIT_FAILURE);
     }
-    if (optind != argc) {
+    if (!create_requested && optind != argc) {
       fprintf(stderr,
               "management operations do not accept environment or command arguments\n");
       exit(EXIT_FAILURE);
+    }
+    if (create_requested) {
+      if (session_id != PTYTERM_SESSION_ALL) {
+        fprintf(stderr, "--create does not accept --session\n");
+        exit(EXIT_FAILURE);
+      }
+      return run_create_client(socket_path, argc - optind, argv + optind);
     }
     if (list_requested)
       return run_list_client(socket_path, session_id);

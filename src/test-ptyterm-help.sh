@@ -23,3 +23,9 @@ printf '%s\n' "$out" | grep -q -- "--stdout=FILE" || {
   printf '%s\n' "$out" >&2
   exit 1
 }
+
+printf '%s\n' "$out" | grep -q -- "--create" || {
+  echo "ptyterm -h: expected create option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}

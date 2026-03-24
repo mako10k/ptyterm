@@ -12,6 +12,7 @@ TESTS = \
 	test-ptyterm-help.sh \
 	test-ptytermd-help.sh \
 	test-ptyterm-buffer-info.sh \
+	test-ptyterm-create.sh \
 	test-ptyterm-list.sh \
 	test-ptywrap-help.sh \
 	test-pbuf-help.sh \

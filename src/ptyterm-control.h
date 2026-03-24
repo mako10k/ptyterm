@@ -16,6 +16,8 @@ enum ptyterm_message_type {
   PTYTERM_MESSAGE_BUFFER_INFO_REQUEST = 3,
   PTYTERM_MESSAGE_BUFFER_INFO_RESPONSE = 4,
   PTYTERM_MESSAGE_ERROR = 5,
+  PTYTERM_MESSAGE_CREATE_REQUEST = 6,
+  PTYTERM_MESSAGE_CREATE_RESPONSE = 7,
 };
 
 enum ptyterm_session_state {
@@ -58,6 +60,16 @@ struct ptyterm_buffer_info_response {
   uint32_t buffer_used;
   uint32_t dropped_bytes;
   uint32_t paused_on_full;
+};
+
+struct ptyterm_create_request {
+  uint32_t argc;
+};
+
+struct ptyterm_create_response {
+  uint32_t session_id;
+  uint32_t state;
+  int32_t child_pid;
 };
 
 struct ptyterm_error_response {
