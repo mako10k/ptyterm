@@ -26,5 +26,6 @@ Makefile
 
 src/biopen
 src/ptyterm
+src/ptytermd
 src/ptywrap
 src/pbuf
