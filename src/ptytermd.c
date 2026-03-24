@@ -83,9 +83,11 @@ int main(int argc, char *const argv[]) {
       printf("  %s [options]\n", argv[0]);
       printf("\n");
       printf("Options:\n");
-      printf("  --socket=PATH              control socket path\n");
-      printf("  --output-buffer=SIZE       per-session output buffer size\n");
-      printf("  --overflow=drop|pause      output buffer overflow policy\n");
+      printf("  -s, --socket=PATH          control socket path\n");
+      printf("  -b, --output-buffer=SIZE   per-session output buffer size "
+             "(default: 4096)\n");
+      printf("  -o, --overflow=drop|pause  output buffer overflow policy "
+             "(default: drop)\n");
       printf("  -V, --version              print version and exit\n");
       printf("  -h, --help                 print this usage and exit\n");
       printf("\n");

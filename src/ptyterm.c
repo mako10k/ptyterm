@@ -221,15 +221,17 @@ int main(int argc, char *const argv[]) {
       printf("Usage:\n");
       printf("  %s [options] [ENVNAME=ENVVALUE ..] [cmd [arg ..]]\n", argv[0]);
       printf("\n");
-      printf("Options:\n");
+      printf("Run options:\n");
       printf("  -c, --cols=N  : set columns\n");
       printf("  -l, --lines=N : set lines\n");
-            printf("  -i, --stdin=FILE : read from FILE instead of stdin "
-              "(alias: --input)\n");
-            printf("  -o, --stdout=FILE : write to FILE instead of stdout "
-              "(alias: --output)\n");
-            printf("  -a, --stdout-append=FILE : append output to FILE instead "
-              "of stdout (alias: --append)\n");
+      printf("  -i, --stdin=FILE : read from FILE instead of stdin "
+             "(alias: --input)\n");
+      printf("  -o, --stdout=FILE : write to FILE instead of stdout "
+             "(alias: --output)\n");
+      printf("  -a, --stdout-append=FILE : append output to FILE instead "
+             "of stdout (alias: --append)\n");
+      printf("\n");
+      printf("Common options:\n");
       printf("  -V, --version : print version and exit\n");
       printf("  -h, --help    : print this usage and exit\n");
       printf("\n");
