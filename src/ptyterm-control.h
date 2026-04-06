@@ -8,6 +8,7 @@
 #define PTYTERM_SOCKET_PATH_MAX 108
 #define PTYTERM_COMMAND_MAX 128
 #define PTYTERM_ERROR_MESSAGE_MAX 128
+#define PTYTERM_REASON_MAX 32
 #define PTYTERM_SESSION_ALL (-1)
 
 enum ptyterm_message_type {
@@ -18,6 +19,16 @@ enum ptyterm_message_type {
   PTYTERM_MESSAGE_ERROR = 5,
   PTYTERM_MESSAGE_CREATE_REQUEST = 6,
   PTYTERM_MESSAGE_CREATE_RESPONSE = 7,
+  PTYTERM_MESSAGE_SEND_REQUEST = 8,
+  PTYTERM_MESSAGE_SEND_RESPONSE = 9,
+  PTYTERM_MESSAGE_RECV_REQUEST = 10,
+  PTYTERM_MESSAGE_RECV_RESPONSE = 11,
+  PTYTERM_MESSAGE_ATTACH_REQUEST = 12,
+  PTYTERM_MESSAGE_ATTACH_RESPONSE = 13,
+  PTYTERM_MESSAGE_DETACH_REQUEST = 14,
+  PTYTERM_MESSAGE_DETACH_RESPONSE = 15,
+  PTYTERM_MESSAGE_RESIZE_REQUEST = 16,
+  PTYTERM_MESSAGE_RESIZE_RESPONSE = 17,
 };
 
 enum ptyterm_session_state {
@@ -70,6 +81,67 @@ struct ptyterm_create_response {
   uint32_t session_id;
   uint32_t state;
   int32_t child_pid;
+};
+
+struct ptyterm_send_request {
+  int32_t session_id;
+  uint32_t data_size;
+};
+
+struct ptyterm_send_response {
+  uint64_t queue_offset;
+  uint32_t requested_bytes;
+  uint32_t sent_bytes;
+  uint32_t unsent_bytes;
+  uint32_t resume_offset;
+  uint32_t blocked;
+  char reason[PTYTERM_REASON_MAX];
+};
+
+struct ptyterm_recv_request {
+  int32_t session_id;
+  uint32_t max_bytes;
+};
+
+struct ptyterm_recv_response {
+  uint64_t start_offset;
+  uint64_t end_offset;
+  uint64_t next_recv_offset;
+  uint64_t oldest_available_offset;
+  uint32_t returned_bytes;
+  uint32_t truncated;
+  char reason[PTYTERM_REASON_MAX];
+};
+
+struct ptyterm_attach_request {
+  int32_t session_id;
+};
+
+struct ptyterm_attach_response {
+  uint32_t session_id;
+  uint32_t state;
+  int32_t child_pid;
+};
+
+struct ptyterm_detach_request {
+  int32_t session_id;
+};
+
+struct ptyterm_detach_response {
+  uint32_t session_id;
+  uint32_t state;
+};
+
+struct ptyterm_resize_request {
+  int32_t session_id;
+  uint16_t rows;
+  uint16_t cols;
+};
+
+struct ptyterm_resize_response {
+  uint32_t session_id;
+  uint16_t rows;
+  uint16_t cols;
 };
 
 struct ptyterm_error_response {

@@ -27,6 +27,16 @@ struct ptyterm_session {
   int32_t child_pid;
   int32_t exit_status;
   int master_fd;
+  int client_fd;
+  size_t pending_input_size;
+  size_t pending_input_capacity;
+  char *pending_input;
+  size_t pending_output_size;
+  size_t pending_output_capacity;
+  char *pending_output;
+  uint64_t recv_offset;
+  uint64_t send_stream_offset;
+  uint64_t total_output_bytes;
   uint32_t buffer_capacity;
   uint32_t buffer_used;
   uint32_t dropped_bytes;
@@ -47,6 +57,17 @@ struct ptyterm_daemon_state {
 
 static volatile sig_atomic_t stop_requested = 0;
 static char cleanup_socket_path[PTYTERM_SOCKET_PATH_MAX];
+
+static int set_nonblocking(int fd) {
+  int flags;
+
+  flags = fcntl(fd, F_GETFL);
+  if (flags == -1)
+    return -1;
+  if ((flags & O_NONBLOCK) != 0)
+    return 0;
+  return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
 
 static unsigned long parse_size(const char *arg, const char *optname) {
   char *end;
@@ -114,8 +135,139 @@ static void append_output(struct ptyterm_session *session, const char *buffer,
     session->output_ring[(session->ring_start + session->ring_len) %
                          session->buffer_capacity] = buffer[i];
     session->ring_len += 1;
+    session->total_output_bytes += 1;
   }
   session->buffer_used = (uint32_t)session->ring_len;
+}
+
+static void close_attached_client(struct ptyterm_session *session) {
+  if (session->client_fd >= 0) {
+    close(session->client_fd);
+    session->client_fd = -1;
+  }
+  session->pending_input_size = 0;
+  session->pending_output_size = 0;
+  if (session->state == PTYTERM_SESSION_ATTACHED)
+    session->state = PTYTERM_SESSION_DETACHED;
+}
+
+static int append_pending_data(char **buffer, size_t *size, size_t *capacity,
+                               const char *data, size_t data_size) {
+  char *new_buffer;
+  size_t new_capacity;
+
+  if (data_size == 0)
+    return 0;
+  if (*capacity - *size >= data_size) {
+    memcpy(*buffer + *size, data, data_size);
+    *size += data_size;
+    return 0;
+  }
+
+  new_capacity = *capacity == 0 ? 4096 : *capacity;
+  while (new_capacity - *size < data_size) {
+    if (new_capacity > SIZE_MAX / 2) {
+      errno = ENOMEM;
+      return -1;
+    }
+    new_capacity *= 2;
+  }
+
+  new_buffer = realloc(*buffer, new_capacity);
+  if (new_buffer == NULL)
+    return -1;
+
+  memcpy(new_buffer + *size, data, data_size);
+  *buffer = new_buffer;
+  *capacity = new_capacity;
+  *size += data_size;
+  return 0;
+}
+
+static int flush_pending_data(int fd, char *buffer, size_t *size) {
+  ssize_t written;
+
+  if (*size == 0)
+    return 0;
+
+  written = write(fd, buffer, *size);
+  if (written == -1) {
+    if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+      return 0;
+    return -1;
+  }
+  if ((size_t)written < *size)
+    memmove(buffer, buffer + written, *size - (size_t)written);
+  *size -= (size_t)written;
+  return 0;
+}
+
+static int append_pending_output(struct ptyterm_session *session,
+                                 const char *data, size_t data_size) {
+  size_t limit;
+
+  limit = session->buffer_capacity;
+  if (limit < 4096)
+    limit = 4096;
+  if (session->pending_output_size > limit ||
+      data_size > limit - session->pending_output_size) {
+    errno = ENOBUFS;
+    return -1;
+  }
+  return append_pending_data(&session->pending_output, &session->pending_output_size,
+                             &session->pending_output_capacity, data, data_size);
+}
+
+static int apply_session_winsize(struct ptyterm_session *session,
+                                 uint16_t rows, uint16_t cols) {
+  struct winsize winsize;
+
+  if (session->master_fd < 0) {
+    errno = EPIPE;
+    return -1;
+  }
+
+  memset(&winsize, 0, sizeof(winsize));
+  winsize.ws_row = rows;
+  winsize.ws_col = cols;
+  if (ioctl(session->master_fd, TIOCSWINSZ, &winsize) == -1)
+    return -1;
+  return 0;
+}
+
+static uint64_t oldest_available_offset(const struct ptyterm_session *session) {
+  return session->total_output_bytes - session->ring_len;
+}
+
+static size_t copy_output_from_offset(const struct ptyterm_session *session,
+                                      uint64_t offset, char *buffer,
+                                      size_t max_bytes) {
+  size_t available;
+  size_t copied;
+  size_t ring_offset;
+
+  if (offset < oldest_available_offset(session) || offset > session->total_output_bytes)
+    return 0;
+
+  available = (size_t)(session->total_output_bytes - offset);
+  if (available > max_bytes)
+    available = max_bytes;
+
+  ring_offset = (size_t)(offset - oldest_available_offset(session));
+  copied = 0;
+  while (copied < available) {
+    size_t chunk;
+    size_t start;
+
+    start = (session->ring_start + ring_offset + copied) % session->buffer_capacity;
+    chunk = available - copied;
+    if (start + chunk > session->buffer_capacity)
+      chunk = session->buffer_capacity - start;
+    memcpy(buffer + copied, session->output_ring + start, chunk);
+    copied += chunk;
+  }
+
+  return copied;
 }
 
 static int next_session_id(const struct ptyterm_daemon_state *state) {
@@ -146,6 +298,10 @@ static int open_session_pty(char **slave_name_out) {
   master_fd = open("/dev/ptmx", O_RDWR);
   if (master_fd == -1)
     return -1;
+  if (set_nonblocking(master_fd) == -1) {
+    close(master_fd);
+    return -1;
+  }
   if (grantpt(master_fd) == -1) {
     close(master_fd);
     return -1;
@@ -270,6 +426,13 @@ static int spawn_session(struct ptyterm_daemon_state *state, uint32_t argc,
   session->child_pid = child_pid;
   session->exit_status = -1;
   session->master_fd = master_fd;
+  session->client_fd = -1;
+  session->pending_input_size = 0;
+  session->pending_input_capacity = 0;
+  session->pending_input = NULL;
+  session->pending_output_size = 0;
+  session->pending_output_capacity = 0;
+  session->pending_output = NULL;
   session->buffer_capacity = state->output_buffer;
   session->output_ring = calloc(1, session->buffer_capacity);
   if (session->output_ring == NULL) {
@@ -298,6 +461,8 @@ static void reap_children(struct ptyterm_daemon_state *state) {
       if (state->sessions[i].child_pid != pid)
         continue;
       state->sessions[i].state = PTYTERM_SESSION_EXITED;
+      close_attached_client(&state->sessions[i]);
+      state->sessions[i].state = PTYTERM_SESSION_EXITED;
       if (WIFEXITED(status)) {
         state->sessions[i].exit_status = WEXITSTATUS(status);
       } else if (WIFSIGNALED(status)) {
@@ -320,14 +485,62 @@ static void drain_session_output(struct ptyterm_session *session) {
   size = read(session->master_fd, buffer, sizeof(buffer));
   if (size > 0) {
     append_output(session, buffer, (size_t)size);
+    if (session->client_fd >= 0) {
+      if (append_pending_output(session, buffer, (size_t)size) == -1 ||
+          flush_pending_data(session->client_fd, session->pending_output,
+                             &session->pending_output_size) == -1) {
+        close_attached_client(session);
+      }
+    }
     return;
   }
+
+  if (size == -1 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+    return;
 
   if (size == 0 || errno == EIO) {
     close(session->master_fd);
     session->master_fd = -1;
+    close_attached_client(session);
     return;
   }
+}
+
+static void drain_attached_input(struct ptyterm_session *session) {
+  char buffer[1024];
+  ssize_t size;
+
+  if (session->client_fd < 0)
+    return;
+
+  if (session->pending_input_size > 0) {
+    if (session->master_fd < 0 ||
+        flush_pending_data(session->master_fd, session->pending_input,
+                           &session->pending_input_size) == -1) {
+      close_attached_client(session);
+    }
+    if (session->pending_input_size > 0)
+      return;
+  }
+
+  size = read(session->client_fd, buffer, sizeof(buffer));
+  if (size > 0) {
+    if (session->master_fd < 0 ||
+        append_pending_data(&session->pending_input, &session->pending_input_size,
+                            &session->pending_input_capacity, buffer,
+                            (size_t)size) == -1 ||
+        flush_pending_data(session->master_fd, session->pending_input,
+                           &session->pending_input_size) == -1) {
+      close_attached_client(session);
+    }
+    return;
+  }
+
+  if (size == -1 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+    return;
+
+  if (size == 0 || errno != EINTR)
+    close_attached_client(session);
 }
 
 static void cleanup_state(struct ptyterm_daemon_state *state) {
@@ -336,6 +549,10 @@ static void cleanup_state(struct ptyterm_daemon_state *state) {
   for (i = 0; i < state->session_count; ++i) {
     if (state->sessions[i].master_fd >= 0)
       close(state->sessions[i].master_fd);
+    if (state->sessions[i].client_fd >= 0)
+      close(state->sessions[i].client_fd);
+    free(state->sessions[i].pending_input);
+    free(state->sessions[i].pending_output);
     if (state->sessions[i].state != PTYTERM_SESSION_EXITED &&
         state->sessions[i].child_pid > 0) {
       kill(state->sessions[i].child_pid, SIGTERM);
@@ -453,6 +670,234 @@ static int send_buffer_info_response(
                               &response, sizeof(response));
 }
 
+static int send_send_response(int client_fd, struct ptyterm_session *session,
+                              uint32_t requested_bytes, uint32_t sent_bytes,
+                              uint32_t blocked, const char *reason,
+                              uint64_t queue_offset) {
+  struct ptyterm_send_response response;
+
+  memset(&response, 0, sizeof(response));
+  response.queue_offset = queue_offset;
+  response.requested_bytes = requested_bytes;
+  response.sent_bytes = sent_bytes;
+  response.unsent_bytes = requested_bytes - sent_bytes;
+  response.resume_offset = sent_bytes;
+  response.blocked = blocked;
+  snprintf(response.reason, sizeof(response.reason), "%s", reason);
+  session->send_stream_offset += sent_bytes;
+  return ptyterm_send_message(client_fd, PTYTERM_MESSAGE_SEND_RESPONSE,
+                              &response, sizeof(response));
+}
+
+static int handle_send_request(int client_fd, struct ptyterm_daemon_state *state,
+                               const void *payload, size_t payload_size) {
+  const struct ptyterm_send_request *request;
+  struct ptyterm_session *session;
+  const char *data;
+  ssize_t sent_bytes;
+  uint64_t queue_offset;
+
+  if (payload_size < sizeof(*request)) {
+    errno = EPROTO;
+    return -1;
+  }
+
+  request = (const struct ptyterm_send_request *)payload;
+  if (payload_size != sizeof(*request) + request->data_size) {
+    errno = EPROTO;
+    return -1;
+  }
+
+  session = (struct ptyterm_session *)find_session(state, request->session_id);
+  if (session == NULL) {
+    errno = ENOENT;
+    return -1;
+  }
+  if (session->master_fd < 0 || session->state == PTYTERM_SESSION_EXITED) {
+    errno = EPIPE;
+    return -1;
+  }
+
+  data = (const char *)(request + 1);
+  queue_offset = session->send_stream_offset;
+  sent_bytes = write(session->master_fd, data, request->data_size);
+  if (sent_bytes == -1) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return send_send_response(client_fd, session, request->data_size, 0, 1,
+                                "would_block", queue_offset);
+    }
+    return -1;
+  }
+
+  return send_send_response(client_fd, session, request->data_size,
+                            (uint32_t)sent_bytes,
+                            sent_bytes < (ssize_t)request->data_size, 
+                            sent_bytes < (ssize_t)request->data_size ?
+                                "would_block" : "ok",
+                            queue_offset);
+}
+
+static int handle_recv_request(int client_fd, struct ptyterm_daemon_state *state,
+                               const void *payload, size_t payload_size) {
+  const struct ptyterm_recv_request *request;
+  struct ptyterm_session *session;
+  struct ptyterm_recv_response *response;
+  size_t response_size;
+  size_t returned_bytes;
+  uint64_t start_offset;
+  uint64_t oldest_offset;
+  char *data;
+
+  if (payload_size != sizeof(*request)) {
+    errno = EPROTO;
+    return -1;
+  }
+
+  request = (const struct ptyterm_recv_request *)payload;
+  session = (struct ptyterm_session *)find_session(state, request->session_id);
+  if (session == NULL) {
+    errno = ENOENT;
+    return -1;
+  }
+
+  oldest_offset = oldest_available_offset(session);
+  start_offset = session->recv_offset;
+  if (start_offset < oldest_offset)
+    start_offset = oldest_offset;
+
+  response_size = sizeof(*response) + request->max_bytes;
+  response = calloc(1, response_size);
+  if (response == NULL)
+    return -1;
+
+  data = (char *)(response + 1);
+  returned_bytes = copy_output_from_offset(session, start_offset, data,
+                                           request->max_bytes);
+  response->start_offset = start_offset;
+  response->oldest_available_offset = oldest_offset;
+  response->returned_bytes = (uint32_t)returned_bytes;
+  response->end_offset = start_offset + returned_bytes;
+  response->next_recv_offset = response->end_offset;
+  response->truncated = session->recv_offset < oldest_offset;
+  snprintf(response->reason, sizeof(response->reason), "%s",
+           returned_bytes == request->max_bytes ? "size_reached" :
+           (session->state == PTYTERM_SESSION_EXITED ? "session_exited" :
+                                                     (response->truncated ? "truncated_gap" : "ok")));
+  session->recv_offset = response->next_recv_offset;
+
+  returned_bytes = ptyterm_send_message(client_fd, PTYTERM_MESSAGE_RECV_RESPONSE,
+                                        response,
+                                        (uint32_t)(sizeof(*response) +
+                                                   response->returned_bytes));
+  free(response);
+  return (int)returned_bytes;
+}
+
+static int handle_attach_request(int client_fd, struct ptyterm_daemon_state *state,
+                                 const void *payload, size_t payload_size) {
+  const struct ptyterm_attach_request *request;
+  struct ptyterm_session *session;
+  struct ptyterm_attach_response response;
+
+  if (payload_size != sizeof(*request)) {
+    errno = EPROTO;
+    return -1;
+  }
+
+  request = (const struct ptyterm_attach_request *)payload;
+  session = (struct ptyterm_session *)find_session(state, request->session_id);
+  if (session == NULL) {
+    errno = ENOENT;
+    return -1;
+  }
+  if (session->state == PTYTERM_SESSION_EXITED || session->master_fd < 0) {
+    errno = EPIPE;
+    return -1;
+  }
+  if (session->client_fd >= 0 || session->state == PTYTERM_SESSION_ATTACHED) {
+    errno = EBUSY;
+    return -1;
+  }
+
+  memset(&response, 0, sizeof(response));
+  response.session_id = session->id;
+  response.state = PTYTERM_SESSION_ATTACHED;
+  response.child_pid = session->child_pid;
+  if (ptyterm_send_message(client_fd, PTYTERM_MESSAGE_ATTACH_RESPONSE,
+                           &response, sizeof(response)) == -1) {
+    return -1;
+  }
+  if (set_nonblocking(client_fd) == -1)
+    return -1;
+
+  session->client_fd = client_fd;
+  session->state = PTYTERM_SESSION_ATTACHED;
+  return 1;
+}
+
+static int handle_detach_request(int client_fd, struct ptyterm_daemon_state *state,
+                                 const void *payload, size_t payload_size) {
+  const struct ptyterm_detach_request *request;
+  struct ptyterm_session *session;
+  struct ptyterm_detach_response response;
+
+  if (payload_size != sizeof(*request)) {
+    errno = EPROTO;
+    return -1;
+  }
+
+  request = (const struct ptyterm_detach_request *)payload;
+  session = (struct ptyterm_session *)find_session(state, request->session_id);
+  if (session == NULL) {
+    errno = ENOENT;
+    return -1;
+  }
+  if (session->client_fd < 0 || session->state != PTYTERM_SESSION_ATTACHED) {
+    errno = ENOTCONN;
+    return -1;
+  }
+
+  close_attached_client(session);
+  memset(&response, 0, sizeof(response));
+  response.session_id = session->id;
+  response.state = session->state;
+  return ptyterm_send_message(client_fd, PTYTERM_MESSAGE_DETACH_RESPONSE,
+                              &response, sizeof(response));
+}
+
+static int handle_resize_request(int client_fd, struct ptyterm_daemon_state *state,
+                                 const void *payload, size_t payload_size) {
+  const struct ptyterm_resize_request *request;
+  struct ptyterm_session *session;
+  struct ptyterm_resize_response response;
+
+  if (payload_size != sizeof(*request)) {
+    errno = EPROTO;
+    return -1;
+  }
+
+  request = (const struct ptyterm_resize_request *)payload;
+  if (request->rows == 0 || request->cols == 0) {
+    errno = EINVAL;
+    return -1;
+  }
+
+  session = (struct ptyterm_session *)find_session(state, request->session_id);
+  if (session == NULL) {
+    errno = ENOENT;
+    return -1;
+  }
+  if (apply_session_winsize(session, request->rows, request->cols) == -1)
+    return -1;
+
+  memset(&response, 0, sizeof(response));
+  response.session_id = session->id;
+  response.rows = request->rows;
+  response.cols = request->cols;
+  return ptyterm_send_message(client_fd, PTYTERM_MESSAGE_RESIZE_RESPONSE,
+                              &response, sizeof(response));
+}
+
 static int handle_create_request(int client_fd, struct ptyterm_daemon_state *state,
                                  const void *payload, size_t payload_size) {
   const struct ptyterm_create_request *request;
@@ -505,7 +950,7 @@ static int handle_create_request(int client_fd, struct ptyterm_daemon_state *sta
                               &response, sizeof(response));
 }
 
-static void handle_client(int client_fd, struct ptyterm_daemon_state *state) {
+static int handle_client(int client_fd, struct ptyterm_daemon_state *state) {
   char payload[4096];
   struct ptyterm_message_header header;
   ssize_t payload_size;
@@ -513,7 +958,7 @@ static void handle_client(int client_fd, struct ptyterm_daemon_state *state) {
   payload_size = ptyterm_recv_message(client_fd, &header, payload, sizeof(payload));
   if (payload_size == -1) {
     send_error_response(client_fd, errno, strerror(errno));
-    return;
+    return 0;
   }
 
   switch (header.type) {
@@ -522,13 +967,13 @@ static void handle_client(int client_fd, struct ptyterm_daemon_state *state) {
 
     if ((size_t)payload_size != sizeof(request)) {
       send_error_response(client_fd, EPROTO, "invalid list request size");
-      return;
+      return 0;
     }
     memcpy(&request, payload, sizeof(request));
     if (send_list_response(client_fd, state, request.session_id) == -1) {
       send_error_response(client_fd, errno, strerror(errno));
     }
-    return;
+    return 0;
   }
   case PTYTERM_MESSAGE_BUFFER_INFO_REQUEST: {
     struct ptyterm_buffer_info_request request;
@@ -536,12 +981,12 @@ static void handle_client(int client_fd, struct ptyterm_daemon_state *state) {
     if ((size_t)payload_size != sizeof(request)) {
       send_error_response(client_fd, EPROTO,
                           "invalid buffer-info request size");
-      return;
+      return 0;
     }
     memcpy(&request, payload, sizeof(request));
     if (request.session_id <= 0) {
       send_error_response(client_fd, EINVAL, "invalid session id");
-      return;
+      return 0;
     }
     if (send_buffer_info_response(client_fd, state, request.session_id) == -1) {
       if (errno == ENOENT) {
@@ -550,16 +995,66 @@ static void handle_client(int client_fd, struct ptyterm_daemon_state *state) {
         send_error_response(client_fd, errno, strerror(errno));
       }
     }
-    return;
+    return 0;
   }
   case PTYTERM_MESSAGE_CREATE_REQUEST:
     if (handle_create_request(client_fd, state, payload, (size_t)payload_size) == -1) {
       send_error_response(client_fd, errno, strerror(errno));
     }
-    return;
+    return 0;
+  case PTYTERM_MESSAGE_SEND_REQUEST:
+    if (handle_send_request(client_fd, state, payload, (size_t)payload_size) == -1) {
+      if (errno == ENOENT) {
+        send_error_response(client_fd, errno, "session not found");
+      } else {
+        send_error_response(client_fd, errno, strerror(errno));
+      }
+    }
+    return 0;
+  case PTYTERM_MESSAGE_RECV_REQUEST:
+    if (handle_recv_request(client_fd, state, payload, (size_t)payload_size) == -1) {
+      if (errno == ENOENT) {
+        send_error_response(client_fd, errno, "session not found");
+      } else {
+        send_error_response(client_fd, errno, strerror(errno));
+      }
+    }
+    return 0;
+  case PTYTERM_MESSAGE_ATTACH_REQUEST: {
+    int attached;
+
+    attached = handle_attach_request(client_fd, state, payload, (size_t)payload_size);
+    if (attached == -1) {
+      if (errno == ENOENT) {
+        send_error_response(client_fd, errno, "session not found");
+      } else {
+        send_error_response(client_fd, errno, strerror(errno));
+      }
+      return 0;
+    }
+    return attached;
+  }
+  case PTYTERM_MESSAGE_DETACH_REQUEST:
+    if (handle_detach_request(client_fd, state, payload, (size_t)payload_size) == -1) {
+      if (errno == ENOENT) {
+        send_error_response(client_fd, errno, "session not found");
+      } else {
+        send_error_response(client_fd, errno, strerror(errno));
+      }
+    }
+    return 0;
+  case PTYTERM_MESSAGE_RESIZE_REQUEST:
+    if (handle_resize_request(client_fd, state, payload, (size_t)payload_size) == -1) {
+      if (errno == ENOENT) {
+        send_error_response(client_fd, errno, "session not found");
+      } else {
+        send_error_response(client_fd, errno, strerror(errno));
+      }
+    }
+    return 0;
   default:
     send_error_response(client_fd, ENOTSUP, "unsupported request type");
-    return;
+    return 0;
   }
 }
 
@@ -659,22 +1154,37 @@ int main(int argc, char *const argv[]) {
 
   while (!stop_requested) {
     fd_set rfds;
+    fd_set wfds;
     int maxfd;
     size_t i;
     int client_fd;
 
     FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
     FD_SET(state.server_fd, &rfds);
     maxfd = state.server_fd;
     for (i = 0; i < state.session_count; ++i) {
       if (state.sessions[i].master_fd < 0)
-        continue;
-      FD_SET(state.sessions[i].master_fd, &rfds);
-      if (maxfd < state.sessions[i].master_fd)
-        maxfd = state.sessions[i].master_fd;
+        ;
+      else {
+        if (state.sessions[i].pending_output_size == 0)
+          FD_SET(state.sessions[i].master_fd, &rfds);
+        if (state.sessions[i].pending_input_size > 0)
+          FD_SET(state.sessions[i].master_fd, &wfds);
+        if (maxfd < state.sessions[i].master_fd)
+          maxfd = state.sessions[i].master_fd;
+      }
+      if (state.sessions[i].client_fd >= 0) {
+        if (state.sessions[i].pending_input_size == 0)
+          FD_SET(state.sessions[i].client_fd, &rfds);
+        if (state.sessions[i].pending_output_size > 0)
+          FD_SET(state.sessions[i].client_fd, &wfds);
+        if (maxfd < state.sessions[i].client_fd)
+          maxfd = state.sessions[i].client_fd;
+      }
     }
 
-    if (select(maxfd + 1, &rfds, NULL, NULL, NULL) == -1) {
+    if (select(maxfd + 1, &rfds, &wfds, NULL, NULL) == -1) {
       if (errno == EINTR)
         continue;
       perror("select");
@@ -682,6 +1192,26 @@ int main(int argc, char *const argv[]) {
     }
 
     for (i = 0; i < state.session_count; ++i) {
+      if (state.sessions[i].master_fd >= 0 && state.sessions[i].pending_input_size > 0 &&
+          FD_ISSET(state.sessions[i].master_fd, &wfds)) {
+        if (flush_pending_data(state.sessions[i].master_fd,
+                               state.sessions[i].pending_input,
+                               &state.sessions[i].pending_input_size) == -1) {
+          close_attached_client(&state.sessions[i]);
+        }
+      }
+      if (state.sessions[i].client_fd >= 0 && state.sessions[i].pending_output_size > 0 &&
+          FD_ISSET(state.sessions[i].client_fd, &wfds)) {
+        if (flush_pending_data(state.sessions[i].client_fd,
+                               state.sessions[i].pending_output,
+                               &state.sessions[i].pending_output_size) == -1) {
+          close_attached_client(&state.sessions[i]);
+        }
+      }
+      if (state.sessions[i].client_fd >= 0 &&
+          FD_ISSET(state.sessions[i].client_fd, &rfds)) {
+        drain_attached_input(&state.sessions[i]);
+      }
       if (state.sessions[i].master_fd >= 0 &&
           FD_ISSET(state.sessions[i].master_fd, &rfds)) {
         drain_session_output(&state.sessions[i]);
@@ -700,8 +1230,8 @@ int main(int argc, char *const argv[]) {
       exit(EXIT_FAILURE);
     }
 
-    handle_client(client_fd, &state);
-    close(client_fd);
+    if (!handle_client(client_fd, &state))
+      close(client_fd);
   }
 
   close(state.server_fd);

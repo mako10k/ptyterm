@@ -10,10 +10,15 @@ ptytermd_SOURCES = ptytermd.c ptyterm-control.c
 
 TESTS = \
 	test-ptyterm-help.sh \
+	test-ptyterm-attach-nonblock.sh \
+	test-ptyterm-attach-resize.sh \
 	test-ptytermd-help.sh \
+	test-ptyterm-attach-detach.sh \
 	test-ptyterm-buffer-info.sh \
 	test-ptyterm-create.sh \
 	test-ptyterm-list.sh \
+	test-ptyterm-resize.sh \
+	test-ptyterm-send-recv.sh \
 	test-ptywrap-help.sh \
 	test-pbuf-help.sh \
 	test-pbuf-copy.sh
