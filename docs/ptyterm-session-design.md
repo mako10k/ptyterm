@@ -285,7 +285,7 @@ Goals:
 #### Draft `ptyterm --help`
 
 ```text
-ptyterm 0.9.0
+ptyterm 0.10.0
 
 Usage:
   ptyterm [run-options] [ENVNAME=ENVVALUE ...] [cmd [arg ...]]
@@ -352,7 +352,7 @@ Notes:
 #### Draft `ptytermd --help`
 
 ```text
-ptytermd 0.9.0
+ptytermd 0.10.0
 
 Usage:
   ptytermd [options]

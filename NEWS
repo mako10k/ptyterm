@@ -1,0 +1,7 @@
+ptyterm 0.10.0
+==============
+
+- add structured YAML help output for automation-oriented discovery
+- add recv peek mode without advancing the shared cursor
+- add recv wait primitives with `--recv-timeout` and `--recv-until`
+
