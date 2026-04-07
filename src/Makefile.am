@@ -7,6 +7,7 @@ ptywrap_SOURCES = ptywrap.c
 biopen_SOURCES = biopen.c
 pbuf_SOURCES = pbuf.c
 ptytermd_SOURCES = ptytermd.c ptyterm-control.c
+noinst_HEADERS = ptyterm-control.h
 
 TESTS = \
 	test-ptyterm-help.sh \
