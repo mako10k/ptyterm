@@ -1,3 +1,9 @@
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#else
+#define PACKAGE_STRING "biopen"
+#endif
+
 #include <errno.h>
 #include <fcntl.h>
 #include <locale.h>
@@ -19,6 +25,31 @@ int main(int argc, char *const argv[]) {
   char *filename = NULL;
 
   setlocale(LC_ALL, "");
+  if (argc == 2 &&
+      (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
+    printf("%s\n", PACKAGE_STRING);
+    printf("\n");
+    printf("Usage:\n");
+    printf("  %s\n", argv[0]);
+    printf("  %s PATH\n", argv[0]);
+    printf("  %s -h\n", argv[0]);
+    printf("  %s -V\n", argv[0]);
+    printf("\n");
+    printf("Options:\n");
+    printf("  -h, --help    : print this usage and exit\n");
+    printf("  -V, --version : print version and exit\n");
+    printf("\n");
+    printf("Notes:\n");
+    printf("  Without PATH, biopen uses the controlling terminal from stdin.\n");
+    printf("  PATH must name a character device or socket opened read-write.\n");
+    exit(EXIT_SUCCESS);
+  }
+  if (argc == 2 &&
+      (strcmp(argv[1], "-V") == 0 || strcmp(argv[1], "--version") == 0)) {
+    printf("%s\n", PACKAGE_STRING);
+    exit(EXIT_SUCCESS);
+  }
+
   switch (argc) {
   case 1:
     filename = ttyname(STDIN_FILENO);
