@@ -1,5 +1,14 @@
 # Project Guidelines
 
+## PMO Agent Discipline
+
+- A custom agent named `PMO` lives under `.github/agents/pmo.agent.md`.
+- At the start of every turn that involves repository work, invoke the `PMO` subagent with a short summary of the task, intended next action, and current status.
+- At the end of every turn that involves repository work, invoke the `PMO` subagent again with a short summary of what was completed, what remains, and any blockers or validation results.
+- The `PMO` agent may use minimal read/progress tools to consult the current repository rules and task state, but it must not design features, write code, or edit repository files.
+- Treat the `PMO` response as a fast process-compliance check: follow its sequencing, validation, and discipline reminders unless they conflict with higher-priority system or developer instructions.
+- Keep `PMO` invocations brief and operational; it is a process checker, not a design or implementation agent.
+
 ## Build and Test
 
 This repository uses GNU Autotools. Prefer an out-of-tree build to keep generated files isolated:
