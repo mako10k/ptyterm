@@ -12,6 +12,7 @@ noinst_HEADERS = ptyterm-control.h
 TESTS = \
 	test-ptyterm-help.sh \
 	test-ptyterm-daemon-lifecycle.sh \
+	test-ptyterm-status-format.sh \
 	test-ptyterm-attach-nonblock.sh \
 	test-ptyterm-attach-resize.sh \
 	test-ptytermd-help.sh \
