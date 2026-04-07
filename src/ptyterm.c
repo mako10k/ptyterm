@@ -31,6 +31,11 @@ static int g_ifd = -1;
 static volatile sig_atomic_t attach_resize_requested = 0;
 static const char *g_program_path = "ptyterm";
 
+enum ptyterm_status_format {
+  PTYTERM_STATUS_FORMAT_TEXT = 1,
+  PTYTERM_STATUS_FORMAT_KV = 2,
+};
+
 static int set_nonblocking(int fd);
 static int resolve_socket_path(const char *socket_path,
                                char *default_socket_path,
@@ -41,6 +46,19 @@ static int connect_daemon_socket(const char *socket_path,
 static void save_termios(int fd);
 static void restore_termios_handler(void);
 static void attach_size_changed(int sig);
+static int parse_status_format(const char *value);
+static void print_create_status(const struct ptyterm_create_response *response,
+                int status_format);
+static void print_buffer_info_status(
+  const struct ptyterm_buffer_info_response *response, int status_format);
+static void print_detach_status(const struct ptyterm_detach_response *response,
+                int status_format);
+static void print_resize_status(const struct ptyterm_resize_response *response,
+                int status_format);
+static void print_daemon_status(int running, int daemon_pid,
+                int status_format);
+static void print_daemon_stop_status(int stopping, int daemon_pid,
+                   int status_format);
 
 static int set_nonblocking(int fd) {
   int flags;
@@ -51,6 +69,98 @@ static int set_nonblocking(int fd) {
   if ((flags & O_NONBLOCK) != 0)
     return 0;
   return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+static int parse_status_format(const char *value) {
+  if (strcmp(value, "text") == 0)
+    return PTYTERM_STATUS_FORMAT_TEXT;
+  if (strcmp(value, "kv") == 0)
+    return PTYTERM_STATUS_FORMAT_KV;
+  return -1;
+}
+
+static void print_create_status(const struct ptyterm_create_response *response,
+                                int status_format) {
+  if (status_format == PTYTERM_STATUS_FORMAT_TEXT) {
+    printf("session id: %u\n", response->session_id);
+    printf("state: %s\n", ptyterm_session_state_name(response->state));
+    printf("child pid: %d\n", response->child_pid);
+    return;
+  }
+
+  printf("session_id=%u\n", response->session_id);
+  printf("state=%s\n", ptyterm_session_state_name(response->state));
+  printf("child_pid=%d\n", response->child_pid);
+}
+
+static void print_buffer_info_status(
+    const struct ptyterm_buffer_info_response *response, int status_format) {
+  if (status_format == PTYTERM_STATUS_FORMAT_TEXT) {
+    printf("id: %u\n", response->id);
+    printf("state: %s\n", ptyterm_session_state_name(response->state));
+    printf("buffer capacity: %u\n", response->buffer_capacity);
+    printf("buffer used: %u\n", response->buffer_used);
+    printf("dropped bytes: %u\n", response->dropped_bytes);
+    printf("paused on full: %s\n", response->paused_on_full ? "yes" : "no");
+    return;
+  }
+
+  printf("id=%u\n", response->id);
+  printf("state=%s\n", ptyterm_session_state_name(response->state));
+  printf("buffer_capacity=%u\n", response->buffer_capacity);
+  printf("buffer_used=%u\n", response->buffer_used);
+  printf("dropped_bytes=%u\n", response->dropped_bytes);
+  printf("paused_on_full=%u\n", response->paused_on_full);
+}
+
+static void print_detach_status(const struct ptyterm_detach_response *response,
+                                int status_format) {
+  if (status_format == PTYTERM_STATUS_FORMAT_TEXT) {
+    printf("session id: %u\n", response->session_id);
+    printf("state: %s\n", ptyterm_session_state_name(response->state));
+    return;
+  }
+
+  printf("session_id=%u\n", response->session_id);
+  printf("state=%s\n", ptyterm_session_state_name(response->state));
+}
+
+static void print_resize_status(const struct ptyterm_resize_response *response,
+                                int status_format) {
+  if (status_format == PTYTERM_STATUS_FORMAT_TEXT) {
+    printf("session id: %u\n", response->session_id);
+    printf("rows: %u\n", response->rows);
+    printf("cols: %u\n", response->cols);
+    return;
+  }
+
+  printf("session_id=%u\n", response->session_id);
+  printf("rows=%u\n", response->rows);
+  printf("cols=%u\n", response->cols);
+}
+
+static void print_daemon_status(int running, int daemon_pid,
+                                int status_format) {
+  if (status_format == PTYTERM_STATUS_FORMAT_TEXT) {
+    printf("daemon: %s\n", running ? "running" : "stopped");
+    printf("daemon pid: %d\n", daemon_pid);
+    return;
+  }
+
+  printf("running=%s\n", running ? "yes" : "no");
+  printf("daemon_pid=%d\n", daemon_pid);
+}
+
+static void print_daemon_stop_status(int stopping, int daemon_pid,
+                                     int status_format) {
+  if (status_format == PTYTERM_STATUS_FORMAT_TEXT) {
+    printf("daemon: %s\n", stopping ? "stopping" : "stopped");
+    printf("daemon pid: %d\n", daemon_pid);
+    return;
+  }
+
+  printf("stopping=%s\n", stopping ? "yes" : "no");
+  printf("daemon_pid=%d\n", daemon_pid);
 }
 
 static int resolve_socket_path(const char *socket_path,
@@ -247,7 +357,8 @@ static int run_list_client(const char *socket_path, int session_id) {
   }
 }
 
-static int run_buffer_info_client(const char *socket_path, int session_id) {
+static int run_buffer_info_client(const char *socket_path, int session_id,
+                                  int status_format) {
   char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
   char payload[4096];
   struct ptyterm_buffer_info_request request;
@@ -287,12 +398,7 @@ static int run_buffer_info_client(const char *socket_path, int session_id) {
     }
 
     response = (const struct ptyterm_buffer_info_response *)payload;
-    printf("id=%u\n", response->id);
-    printf("state=%s\n", ptyterm_session_state_name(response->state));
-    printf("buffer_capacity=%u\n", response->buffer_capacity);
-    printf("buffer_used=%u\n", response->buffer_used);
-    printf("dropped_bytes=%u\n", response->dropped_bytes);
-    printf("paused_on_full=%u\n", response->paused_on_full);
+    print_buffer_info_status(response, status_format);
     return EXIT_SUCCESS;
   }
   case PTYTERM_MESSAGE_ERROR: {
@@ -313,7 +419,7 @@ static int run_buffer_info_client(const char *socket_path, int session_id) {
 }
 
 static int run_create_client(const char *socket_path, int cmd_argc,
-                             char *const cmd_argv[]) {
+                             char *const cmd_argv[], int status_format) {
   char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
   char payload[4096];
   struct ptyterm_create_request *request;
@@ -368,9 +474,7 @@ static int run_create_client(const char *socket_path, int cmd_argc,
       return EXIT_FAILURE;
     }
     response = (const struct ptyterm_create_response *)payload;
-    printf("session_id=%u\n", response->session_id);
-    printf("state=%s\n", ptyterm_session_state_name(response->state));
-    printf("child_pid=%d\n", response->child_pid);
+    print_create_status(response, status_format);
     return EXIT_SUCCESS;
   }
   case PTYTERM_MESSAGE_ERROR: {
@@ -625,7 +729,8 @@ static int run_recv_client(const char *socket_path, int session_id,
   return EXIT_SUCCESS;
 }
 
-static int run_detach_client(const char *socket_path, int session_id) {
+static int run_detach_client(const char *socket_path, int session_id,
+                             int status_format) {
   char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
   char payload[4096];
   struct ptyterm_detach_request request;
@@ -670,8 +775,7 @@ static int run_detach_client(const char *socket_path, int session_id) {
   }
 
   response = (const struct ptyterm_detach_response *)payload;
-  printf("session_id=%u\n", response->session_id);
-  printf("state=%s\n", ptyterm_session_state_name(response->state));
+  print_detach_status(response, status_format);
   return EXIT_SUCCESS;
 }
 
@@ -736,15 +840,13 @@ static int request_resize_client(const char *socket_path, int session_id,
 }
 
 static int run_resize_client(const char *socket_path, int session_id,
-                             uint16_t rows, uint16_t cols) {
+                             uint16_t rows, uint16_t cols, int status_format) {
   struct ptyterm_resize_response response;
 
   if (request_resize_client(socket_path, session_id, rows, cols, &response) == -1)
     return EXIT_FAILURE;
 
-  printf("session_id=%u\n", response.session_id);
-  printf("rows=%u\n", response.rows);
-  printf("cols=%u\n", response.cols);
+  print_resize_status(&response, status_format);
   return EXIT_SUCCESS;
 }
 
@@ -766,7 +868,8 @@ static void attach_size_changed(int sig) {
   attach_resize_requested = 1;
 }
 
-static int run_daemon_status_client(const char *socket_path) {
+static int run_daemon_status_client(const char *socket_path,
+                                    int status_format) {
   char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
   char payload[4096];
   struct ptyterm_message_header header;
@@ -777,8 +880,7 @@ static int run_daemon_status_client(const char *socket_path) {
   fd = connect_daemon_socket(socket_path, default_socket_path, 0);
   if (fd == -1) {
     if (can_autostart_daemon(errno)) {
-      printf("running=no\n");
-      printf("daemon_pid=0\n");
+      print_daemon_status(0, 0, status_format);
       return EXIT_SUCCESS;
     }
     perror(socket_path);
@@ -806,12 +908,11 @@ static int run_daemon_status_client(const char *socket_path) {
   }
 
   response = (const struct ptyterm_daemon_status_response *)payload;
-  printf("running=%s\n", response->running ? "yes" : "no");
-  printf("daemon_pid=%d\n", response->daemon_pid);
+  print_daemon_status(response->running, response->daemon_pid, status_format);
   return EXIT_SUCCESS;
 }
 
-static int run_daemon_stop_client(const char *socket_path) {
+static int run_daemon_stop_client(const char *socket_path, int status_format) {
   char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
   char payload[4096];
   struct ptyterm_message_header header;
@@ -822,8 +923,7 @@ static int run_daemon_stop_client(const char *socket_path) {
   fd = connect_daemon_socket(socket_path, default_socket_path, 0);
   if (fd == -1) {
     if (can_autostart_daemon(errno)) {
-      printf("stopping=no\n");
-      printf("daemon_pid=0\n");
+      print_daemon_stop_status(0, 0, status_format);
       return EXIT_SUCCESS;
     }
     perror(socket_path);
@@ -851,8 +951,8 @@ static int run_daemon_stop_client(const char *socket_path) {
   }
 
   response = (const struct ptyterm_daemon_shutdown_response *)payload;
-  printf("stopping=%s\n", response->stopping ? "yes" : "no");
-  printf("daemon_pid=%d\n", response->daemon_pid);
+  print_daemon_stop_status(response->stopping, response->daemon_pid,
+                           status_format);
   return EXIT_SUCCESS;
 }
 
@@ -1235,6 +1335,7 @@ int main(int argc, char *const argv[]) {
   int list_requested = 0;
   int resize_requested = 0;
   int recv_requested = 0;
+  int status_format = PTYTERM_STATUS_FORMAT_KV;
   const char *send_data = NULL;
   uint32_t recv_size = 4096;
   int session_id = PTYTERM_SESSION_ALL;
@@ -1253,6 +1354,7 @@ int main(int argc, char *const argv[]) {
       OPT_RECV_SIZE,
       OPT_DAEMON_STATUS,
       OPT_DAEMON_STOP,
+      OPT_STATUS_FORMAT,
     };
 
     char *p;
@@ -1263,6 +1365,7 @@ int main(int argc, char *const argv[]) {
                        {"create", no_argument, NULL, 'C'},
                      {"daemon-status", no_argument, NULL, OPT_DAEMON_STATUS},
                      {"daemon-stop", no_argument, NULL, OPT_DAEMON_STOP},
+                       {"status-format", required_argument, NULL, OPT_STATUS_FORMAT},
                {"detach", no_argument, NULL, 'D'},
                        {"resize", no_argument, NULL, 'R'},
                        {"send", required_argument, NULL, OPT_SEND},
@@ -1314,6 +1417,7 @@ int main(int argc, char *const argv[]) {
       printf("  -C, --create        : create a daemon-managed session\n");
       printf("      --daemon-status : report whether the daemon is running\n");
       printf("      --daemon-stop   : request graceful daemon shutdown\n");
+      printf("      --status-format=text|kv : select structured status output\n");
       printf("  -D, --detach        : detach one attached daemon-managed session\n");
       printf("  -R, --resize        : resize one daemon-managed session\n");
       printf("  -L, --list          : list daemon-managed sessions\n");
@@ -1342,6 +1446,13 @@ int main(int argc, char *const argv[]) {
       break;
     case OPT_DAEMON_STOP:
       daemon_stop_requested = 1;
+      break;
+    case OPT_STATUS_FORMAT:
+      status_format = parse_status_format(optarg);
+      if (status_format < 0) {
+        fprintf(stderr, "%s: unsupported status format: %s\n", argv[0], optarg);
+        return EXIT_FAILURE;
+      }
       break;
     case 'D':
       detach_requested = 1;
@@ -1443,12 +1554,13 @@ int main(int argc, char *const argv[]) {
         fprintf(stderr, "--create does not accept --session\n");
         exit(EXIT_FAILURE);
       }
-      return run_create_client(socket_path, argc - optind, argv + optind);
+      return run_create_client(socket_path, argc - optind, argv + optind,
+                               status_format);
     }
     if (daemon_status_requested)
-      return run_daemon_status_client(socket_path);
+      return run_daemon_status_client(socket_path, status_format);
     if (daemon_stop_requested)
-      return run_daemon_stop_client(socket_path);
+      return run_daemon_stop_client(socket_path, status_format);
     if (list_requested)
       return run_list_client(socket_path, session_id);
     if (session_id == PTYTERM_SESSION_ALL) {
@@ -1458,20 +1570,20 @@ int main(int argc, char *const argv[]) {
     if (attach_requested)
       return run_attach_client(socket_path, session_id, ifd, ofd);
     if (detach_requested)
-      return run_detach_client(socket_path, session_id);
+      return run_detach_client(socket_path, session_id, status_format);
     if (resize_requested) {
       if (opt_cols <= 0 || opt_lines <= 0) {
         fprintf(stderr, "--resize requires --rows=N and --cols=N\n");
         exit(EXIT_FAILURE);
       }
       return run_resize_client(socket_path, session_id, (uint16_t)opt_lines,
-                               (uint16_t)opt_cols);
+                               (uint16_t)opt_cols, status_format);
     }
     if (send_data != NULL)
       return run_send_client(socket_path, session_id, send_data);
     if (recv_requested)
       return run_recv_client(socket_path, session_id, recv_size);
-    return run_buffer_info_client(socket_path, session_id);
+    return run_buffer_info_client(socket_path, session_id, status_format);
   }
 
   /// @brief 環境変数を設定する
