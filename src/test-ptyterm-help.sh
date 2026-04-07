@@ -96,6 +96,12 @@ printf '%s\n' "$out" | grep -q -- "--recv" || {
   exit 1
 }
 
+printf '%s\n' "$out" | grep -q -- "--peek" || {
+  echo "ptyterm -h: expected peek option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
 printf '%s\n' "$out" | grep -q -- "--rows=N" || {
   echo "ptyterm -h: expected rows option in output" >&2
   printf '%s\n' "$out" >&2

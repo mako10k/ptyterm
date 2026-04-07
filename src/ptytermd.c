@@ -777,13 +777,16 @@ static int handle_recv_request(int client_fd, struct ptyterm_daemon_state *state
   response->oldest_available_offset = oldest_offset;
   response->returned_bytes = (uint32_t)returned_bytes;
   response->end_offset = start_offset + returned_bytes;
-  response->next_recv_offset = response->end_offset;
+  response->next_recv_offset =
+      (request->flags & PTYTERM_RECV_FLAG_PEEK) != 0 ? session->recv_offset
+                                                     : response->end_offset;
   response->truncated = session->recv_offset < oldest_offset;
   snprintf(response->reason, sizeof(response->reason), "%s",
            returned_bytes == request->max_bytes ? "size_reached" :
            (session->state == PTYTERM_SESSION_EXITED ? "session_exited" :
                                                      (response->truncated ? "truncated_gap" : "ok")));
-  session->recv_offset = response->next_recv_offset;
+  if ((request->flags & PTYTERM_RECV_FLAG_PEEK) == 0)
+    session->recv_offset = response->next_recv_offset;
 
   returned_bytes = ptyterm_send_message(client_fd, PTYTERM_MESSAGE_RECV_RESPONSE,
                                         response,
