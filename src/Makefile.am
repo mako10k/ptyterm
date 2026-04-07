@@ -27,6 +27,7 @@ TESTS = \
 	test-ptyterm-resize.sh \
 	test-ptyterm-send-recv.sh \
 	test-ptywrap-help.sh \
+	test-biopen-help.sh \
 	test-pbuf-help.sh \
 	test-pbuf-copy.sh
 
