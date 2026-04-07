@@ -99,6 +99,21 @@ alternate representation intended for automation, prompting, and tool-driven
 capability discovery. Argument and option errors point to both help entry
 points.
 
+Documentation status
+--------------------
+
+- `ptyterm`: README examples, text help, and YAML help are the canonical user-facing documentation.
+- `ptytermd`: text help is implemented and README examples below cover daemon startup and configuration.
+- `ptywrap`: text help is implemented and README examples below cover both default and daemon modes.
+- `pbuf`: text help is implemented and README examples below cover the main buffered-copy workflow.
+- `biopen`: no built-in `--help` or `--version` interface is currently implemented; the supported interface is the positional `[PATH]` form described below.
+
+Man-page status
+---------------
+
+This release does not ship project man pages for `ptyterm`, `ptytermd`, `ptywrap`, `biopen`, or `pbuf`.
+For v0.10.0, the canonical release-facing documentation is the combination of this README and each binary's built-in help output where available. Man-page coverage is explicitly deferred rather than implicit.
+
 Run a command:
 
 ```sh
@@ -109,6 +124,30 @@ Log output to a file:
 
 ```sh
 ./src/ptyterm --output=pty.log -- bash -lc 'echo hello; sleep 1'
+```
+
+`ptytermd` (manual daemon startup):
+
+```sh
+./src/ptytermd --socket=/tmp/ptyterm.sock --output-buffer=64k
+```
+
+`ptywrap` (print the slave PTY path and run the default `/bin/cat`):
+
+```sh
+./src/ptywrap
+```
+
+`ptywrap` (daemonize the wrapped command):
+
+```sh
+./src/ptywrap --daemon -- /bin/sh -c 'echo hello >/tmp/ptywrap.log; sleep 5'
+```
+
+`biopen` (bridge stdin/stdout to a tty or socket):
+
+```sh
+./src/biopen /dev/ttyUSB0
 ```
 
 `pbuf` (copy with a larger buffer):
