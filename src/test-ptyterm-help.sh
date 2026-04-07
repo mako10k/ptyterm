@@ -42,6 +42,24 @@ printf '%s\n' "$out" | grep -q -- "--daemon-stop" || {
   exit 1
 }
 
+printf '%s\n' "$out" | grep -q -- "--help-format=text|yaml" || {
+  echo "ptyterm -h: expected help-format option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "Structured help:" || {
+  echo "ptyterm -h: expected structured help discovery section" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--help-format=yaml" || {
+  echo "ptyterm -h: expected structured help command in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
 printf '%s\n' "$out" | grep -q -- "--status-format=text|kv" || {
   echo "ptyterm -h: expected status-format option in output" >&2
   printf '%s\n' "$out" >&2
