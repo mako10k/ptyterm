@@ -14,6 +14,7 @@ TESTS = \
 	test-ptyterm-help-errors.sh \
 	test-ptyterm-help-format.sh \
 	test-ptyterm-recv-peek-errors.sh \
+	test-ptyterm-recv-wait.sh \
 	test-ptyterm-daemon-lifecycle.sh \
 	test-ptyterm-status-format.sh \
 	test-ptyterm-attach-nonblock.sh \
