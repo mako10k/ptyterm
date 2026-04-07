@@ -87,6 +87,18 @@ Daemon-backed management auto-starts `ptytermd` when needed:
 ./src/ptyterm --daemon-stop
 ```
 
+Help and automation discovery:
+
+```sh
+./src/ptyterm --help
+./src/ptyterm --help-format=yaml
+```
+
+The default help stays text-first for terminal use. The YAML form is a stable,
+alternate representation intended for automation, prompting, and tool-driven
+capability discovery. Argument and option errors point to both help entry
+points.
+
 Run a command:
 
 ```sh
@@ -104,3 +116,4 @@ Log output to a file:
 ```sh
 cat bigfile | ./src/pbuf --buffer-size=1m > /tmp/out
 ```
+

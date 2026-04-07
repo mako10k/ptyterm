@@ -11,6 +11,7 @@
 #include <getopt.h>
 #include <limits.h>
 #include <locale.h>
+#include <stdarg.h>
 #include <ctype.h>
 #include <pty.h>
 #include <signal.h>
@@ -36,6 +37,11 @@ enum ptyterm_status_format {
   PTYTERM_STATUS_FORMAT_KV = 2,
 };
 
+enum ptyterm_help_format {
+  PTYTERM_HELP_FORMAT_TEXT = 1,
+  PTYTERM_HELP_FORMAT_YAML = 2,
+};
+
 static int set_nonblocking(int fd);
 static int resolve_socket_path(const char *socket_path,
                                char *default_socket_path,
@@ -47,6 +53,9 @@ static void save_termios(int fd);
 static void restore_termios_handler(void);
 static void attach_size_changed(int sig);
 static int parse_status_format(const char *value);
+static int parse_help_format(const char *value);
+static void print_help(FILE *out, const char *program_name, int help_format);
+static int usage_error(const char *program_name, const char *fmt, ...);
 static void print_create_status(const struct ptyterm_create_response *response,
                 int status_format);
 static void print_buffer_info_status(
@@ -77,6 +86,212 @@ static int parse_status_format(const char *value) {
   if (strcmp(value, "kv") == 0)
     return PTYTERM_STATUS_FORMAT_KV;
   return -1;
+}
+
+static int parse_help_format(const char *value) {
+  if (strcmp(value, "text") == 0)
+    return PTYTERM_HELP_FORMAT_TEXT;
+  if (strcmp(value, "yaml") == 0)
+    return PTYTERM_HELP_FORMAT_YAML;
+  return -1;
+}
+
+static void print_help_discovery(FILE *out, const char *program_name) {
+  fprintf(out, "Structured help:\n");
+  fprintf(out, "  %s --help-format=yaml\n", program_name);
+  fprintf(out, "\n");
+}
+
+static void print_text_help(FILE *out, const char *program_name) {
+  fprintf(out, "%s\n", PACKAGE_STRING);
+  fprintf(out, "\n");
+  fprintf(out, "Usage:\n");
+  fprintf(out, "  %s [options] [ENVNAME=ENVVALUE ..] [cmd [arg ..]]\n",
+          program_name);
+  fprintf(out, "\n");
+  fprintf(out, "Run options:\n");
+  fprintf(out, "  -c, --cols=N  : set columns\n");
+  fprintf(out, "  -l, --lines=N : set lines\n");
+  fprintf(out,
+          "  -i, --stdin=FILE : read from FILE instead of stdin (alias: --input)\n");
+  fprintf(out,
+          "  -o, --stdout=FILE : write to FILE instead of stdout (alias: --output)\n");
+  fprintf(out,
+          "  -a, --stdout-append=FILE : append output to FILE instead of stdout (alias: --append)\n");
+  fprintf(out, "\n");
+  fprintf(out, "Management options:\n");
+  fprintf(out, "  -A, --attach        : attach to one daemon-managed session\n");
+  fprintf(out, "  -C, --create        : create a daemon-managed session\n");
+  fprintf(out, "      --daemon-status : report whether the daemon is running\n");
+  fprintf(out, "      --daemon-stop   : request graceful daemon shutdown\n");
+  fprintf(out, "      --status-format=text|kv : select structured status output\n");
+  fprintf(out, "  -D, --detach        : detach one attached daemon-managed session\n");
+  fprintf(out, "  -R, --resize        : resize one daemon-managed session\n");
+  fprintf(out, "  -L, --list          : list daemon-managed sessions\n");
+  fprintf(out, "  -B, --buffer-info   : show buffer state for one session\n");
+  fprintf(out, "      --send=DATA     : send decoded bytes to one session\n");
+  fprintf(out, "      --recv          : receive buffered output from one session\n");
+  fprintf(out, "      --recv-size=N   : maximum bytes returned by --recv\n");
+  fprintf(out, "      --session=ID    : select one session for management operations\n");
+  fprintf(out, "      --rows=N        : rows for --resize (alias: --lines)\n");
+  fprintf(out, "      --cols=N        : cols for --resize\n");
+  fprintf(out, "  -s, --socket=PATH   : override daemon control socket path\n");
+  fprintf(out, "\n");
+  fprintf(out, "Common options:\n");
+  fprintf(out, "  -V, --version             : print version and exit\n");
+  fprintf(out, "  -h, --help                : print this usage and exit\n");
+  fprintf(out, "      --help-format=text|yaml : print help in the selected format\n");
+  fprintf(out, "\n");
+  print_help_discovery(out, program_name);
+}
+
+static void print_yaml_help(FILE *out, const char *program_name) {
+  fprintf(out, "program: ptyterm\n");
+  fprintf(out, "version: \"%s\"\n", PACKAGE_VERSION);
+  fprintf(out, "summary: Interactive PTY wrapper and daemon session client\n");
+  fprintf(out, "default_mode: run\n");
+  fprintf(out, "discovery:\n");
+  fprintf(out, "  text_help: \"%s --help\"\n", program_name);
+  fprintf(out, "  structured_help: \"%s --help-format=yaml\"\n",
+          program_name);
+  fprintf(out, "usage:\n");
+  fprintf(out, "  - \"%s [options] [ENVNAME=ENVVALUE ..] [cmd [arg ..]]\"\n",
+          program_name);
+  fprintf(out, "sections:\n");
+  fprintf(out, "  common_options:\n");
+  fprintf(out, "    - long: --help\n");
+  fprintf(out, "      short: -h\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      description: Print text help and exit.\n");
+  fprintf(out, "    - long: --help-format\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: text|yaml\n");
+  fprintf(out, "      default: text\n");
+  fprintf(out, "      description: Print help in the selected format and exit.\n");
+  fprintf(out, "    - long: --version\n");
+  fprintf(out, "      short: -V\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      description: Print version and exit.\n");
+  fprintf(out, "    - long: --socket\n");
+  fprintf(out, "      short: -s\n");
+  fprintf(out, "      argument: PATH\n");
+  fprintf(out, "      description: Override daemon control socket path.\n");
+  fprintf(out, "  run_options:\n");
+  fprintf(out, "    - long: --stdin\n");
+  fprintf(out, "      short: -i\n");
+  fprintf(out, "      aliases: [--input]\n");
+  fprintf(out, "      argument: FILE\n");
+  fprintf(out, "      description: Read from FILE instead of stdin.\n");
+  fprintf(out, "    - long: --stdout\n");
+  fprintf(out, "      short: -o\n");
+  fprintf(out, "      aliases: [--output]\n");
+  fprintf(out, "      argument: FILE\n");
+  fprintf(out, "      description: Write to FILE instead of stdout.\n");
+  fprintf(out, "    - long: --stdout-append\n");
+  fprintf(out, "      short: -a\n");
+  fprintf(out, "      aliases: [--append]\n");
+  fprintf(out, "      argument: FILE\n");
+  fprintf(out, "      description: Append output to FILE instead of stdout.\n");
+  fprintf(out, "    - long: --cols\n");
+  fprintf(out, "      short: -c\n");
+  fprintf(out, "      argument: N\n");
+  fprintf(out, "      description: Set initial PTY columns.\n");
+  fprintf(out, "    - long: --lines\n");
+  fprintf(out, "      short: -l\n");
+  fprintf(out, "      aliases: [--rows]\n");
+  fprintf(out, "      argument: N\n");
+  fprintf(out, "      description: Set initial PTY lines.\n");
+  fprintf(out, "  management_operations:\n");
+  fprintf(out, "    - long: --attach\n");
+  fprintf(out, "      short: -A\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      requires: [--session]\n");
+  fprintf(out, "      description: Attach to one daemon-managed session.\n");
+  fprintf(out, "    - long: --create\n");
+  fprintf(out, "      short: -C\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      description: Create a daemon-managed session.\n");
+  fprintf(out, "    - long: --daemon-status\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      description: Report whether the daemon is running.\n");
+  fprintf(out, "    - long: --daemon-stop\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      description: Request graceful daemon shutdown.\n");
+  fprintf(out, "    - long: --detach\n");
+  fprintf(out, "      short: -D\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      requires: [--session]\n");
+  fprintf(out, "      description: Detach one attached daemon-managed session.\n");
+  fprintf(out, "    - long: --resize\n");
+  fprintf(out, "      short: -R\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      requires: [--session, --rows, --cols]\n");
+  fprintf(out, "      description: Resize one daemon-managed session.\n");
+  fprintf(out, "    - long: --list\n");
+  fprintf(out, "      short: -L\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      description: List daemon-managed sessions.\n");
+  fprintf(out, "    - long: --buffer-info\n");
+  fprintf(out, "      short: -B\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      requires: [--session]\n");
+  fprintf(out, "      description: Show buffer state for one session.\n");
+  fprintf(out, "    - long: --send\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: DATA\n");
+  fprintf(out, "      requires: [--session]\n");
+  fprintf(out, "      description: Send decoded bytes to one session.\n");
+  fprintf(out, "    - long: --recv\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      requires: [--session]\n");
+  fprintf(out, "      description: Receive buffered output from one session.\n");
+  fprintf(out, "    - long: --recv-size\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: N\n");
+  fprintf(out, "      requires: [--recv]\n");
+  fprintf(out, "      default: 4096\n");
+  fprintf(out, "      description: Maximum bytes returned by recv.\n");
+  fprintf(out, "    - long: --session\n");
+  fprintf(out, "      short: -S\n");
+  fprintf(out, "      argument: ID\n");
+  fprintf(out, "      description: Select one session for management operations.\n");
+  fprintf(out, "examples:\n");
+  fprintf(out, "  - description: Print text help\n");
+  fprintf(out, "    command: \"%s --help\"\n", program_name);
+  fprintf(out, "  - description: Print structured help\n");
+  fprintf(out, "    command: \"%s --help-format=yaml\"\n", program_name);
+  fprintf(out, "  - description: Create a managed session\n");
+  fprintf(out, "    command: \"%s --create -- /bin/sh -c 'echo hello; sleep 30'\"\n",
+          program_name);
+  fprintf(out, "notes:\n");
+  fprintf(out, "  - Exactly one management operation may be selected per invocation.\n");
+  fprintf(out, "  - Management operations cannot be combined with standalone run output redirection except attach.\n");
+  fprintf(out, "  - Status output formatting is controlled separately with --status-format=text|kv.\n");
+}
+
+static void print_help(FILE *out, const char *program_name, int help_format) {
+  if (help_format == PTYTERM_HELP_FORMAT_YAML) {
+    print_yaml_help(out, program_name);
+    return;
+  }
+
+  print_text_help(out, program_name);
+}
+
+static int usage_error(const char *program_name, const char *fmt, ...) {
+  va_list ap;
+
+  va_start(ap, fmt);
+  vfprintf(stderr, fmt, ap);
+  va_end(ap);
+  fprintf(stderr, "\n");
+  fprintf(stderr, "See '%s --help' for text help.\n", program_name);
+  fprintf(stderr, "See '%s --help-format=yaml' for structured help.\n",
+          program_name);
+  return EXIT_FAILURE;
 }
 
 static void print_create_status(const struct ptyterm_create_response *response,
@@ -1332,6 +1547,8 @@ int main(int argc, char *const argv[]) {
   int daemon_status_requested = 0;
   int daemon_stop_requested = 0;
   int detach_requested = 0;
+  int help_requested = 0;
+  int help_format = PTYTERM_HELP_FORMAT_TEXT;
   int list_requested = 0;
   int resize_requested = 0;
   int recv_requested = 0;
@@ -1354,6 +1571,7 @@ int main(int argc, char *const argv[]) {
       OPT_RECV_SIZE,
       OPT_DAEMON_STATUS,
       OPT_DAEMON_STOP,
+      OPT_HELP_FORMAT,
       OPT_STATUS_FORMAT,
     };
 
@@ -1365,6 +1583,7 @@ int main(int argc, char *const argv[]) {
                        {"create", no_argument, NULL, 'C'},
                      {"daemon-status", no_argument, NULL, OPT_DAEMON_STATUS},
                      {"daemon-stop", no_argument, NULL, OPT_DAEMON_STOP},
+                     {"help-format", required_argument, NULL, OPT_HELP_FORMAT},
                        {"status-format", required_argument, NULL, OPT_STATUS_FORMAT},
                {"detach", no_argument, NULL, 'D'},
                        {"resize", no_argument, NULL, 'R'},
@@ -1388,53 +1607,17 @@ int main(int argc, char *const argv[]) {
                        {NULL, 0, NULL, 0}};
 
     /// @brief オプションを取得する
-    opt = getopt_long(argc, argv, "+VhACDRs:BLi:o:a:c:l:S:", longopts, &optindex);
+    opt = getopt_long(argc, argv, "+:VhACDRs:BLi:o:a:c:l:S:", longopts, &optindex);
     if (opt == -1)
       break;
 
     switch (opt) {
-    case 'h':
     case 'V':
       printf("%s\n", PACKAGE_STRING);
-      if (opt != 'h')
-        exit(EXIT_SUCCESS);
-      printf("\n");
-      printf("Usage:\n");
-      printf("  %s [options] [ENVNAME=ENVVALUE ..] [cmd [arg ..]]\n", argv[0]);
-      printf("\n");
-      printf("Run options:\n");
-      printf("  -c, --cols=N  : set columns\n");
-      printf("  -l, --lines=N : set lines\n");
-      printf("  -i, --stdin=FILE : read from FILE instead of stdin "
-             "(alias: --input)\n");
-      printf("  -o, --stdout=FILE : write to FILE instead of stdout "
-             "(alias: --output)\n");
-      printf("  -a, --stdout-append=FILE : append output to FILE instead "
-             "of stdout (alias: --append)\n");
-      printf("\n");
-      printf("Management options:\n");
-      printf("  -A, --attach        : attach to one daemon-managed session\n");
-      printf("  -C, --create        : create a daemon-managed session\n");
-      printf("      --daemon-status : report whether the daemon is running\n");
-      printf("      --daemon-stop   : request graceful daemon shutdown\n");
-      printf("      --status-format=text|kv : select structured status output\n");
-      printf("  -D, --detach        : detach one attached daemon-managed session\n");
-      printf("  -R, --resize        : resize one daemon-managed session\n");
-      printf("  -L, --list          : list daemon-managed sessions\n");
-      printf("  -B, --buffer-info   : show buffer state for one session\n");
-      printf("      --send=DATA     : send decoded bytes to one session\n");
-      printf("      --recv          : receive buffered output from one session\n");
-      printf("      --recv-size=N   : maximum bytes returned by --recv\n");
-      printf("      --session=ID    : select one session for management operations\n");
-      printf("      --rows=N        : rows for --resize (alias: --lines)\n");
-      printf("      --cols=N        : cols for --resize\n");
-      printf("  -s, --socket=PATH   : override daemon control socket path\n");
-      printf("\n");
-      printf("Common options:\n");
-      printf("  -V, --version : print version and exit\n");
-      printf("  -h, --help    : print this usage and exit\n");
-      printf("\n");
-      exit(EXIT_SUCCESS);
+      return EXIT_SUCCESS;
+    case 'h':
+      help_requested = 1;
+      break;
     case 'A':
       attach_requested = 1;
       break;
@@ -1447,12 +1630,16 @@ int main(int argc, char *const argv[]) {
     case OPT_DAEMON_STOP:
       daemon_stop_requested = 1;
       break;
+    case OPT_HELP_FORMAT:
+      help_format = parse_help_format(optarg);
+      if (help_format < 0)
+        return usage_error(argv[0], "unsupported help format: %s", optarg);
+      help_requested = 1;
+      break;
     case OPT_STATUS_FORMAT:
       status_format = parse_status_format(optarg);
-      if (status_format < 0) {
-        fprintf(stderr, "%s: unsupported status format: %s\n", argv[0], optarg);
-        return EXIT_FAILURE;
-      }
+      if (status_format < 0)
+        return usage_error(argv[0], "unsupported status format: %s", optarg);
       break;
     case 'D':
       detach_requested = 1;
@@ -1468,10 +1655,8 @@ int main(int argc, char *const argv[]) {
       break;
     case OPT_RECV_SIZE:
       recv_size = (uint32_t)strtoul(optarg, &p, 0);
-      if (optarg == p || *p != '\0' || recv_size == 0) {
-        fprintf(stderr, "invalid recv-size: %s\n", optarg);
-        exit(EXIT_FAILURE);
-      }
+      if (optarg == p || *p != '\0' || recv_size == 0)
+        return usage_error(argv[0], "invalid recv-size: %s", optarg);
       break;
     case 's':
       socket_path = optarg;
@@ -1493,33 +1678,37 @@ int main(int argc, char *const argv[]) {
       break;
     case 'c':
       opt_cols = strtol(optarg, &p, 0);
-      if (optarg == p || *p != '\0' || opt_cols <= 0) {
-        fprintf(stderr, "invalid cols: %s\n", optarg);
-        exit(EXIT_FAILURE);
-      }
+      if (optarg == p || *p != '\0' || opt_cols <= 0)
+        return usage_error(argv[0], "invalid cols: %s", optarg);
       break;
     case 'l':
       opt_lines = strtol(optarg, &p, 0);
-      if (optarg == p || *p != '\0' || opt_lines <= 0) {
-        fprintf(stderr, "invalid lines: %s\n", optarg);
-        exit(EXIT_FAILURE);
-      }
+      if (optarg == p || *p != '\0' || opt_lines <= 0)
+        return usage_error(argv[0], "invalid lines: %s", optarg);
       break;
     case 'S':
       session_id = strtol(optarg, &p, 0);
-      if (optarg == p || *p != '\0' || session_id <= 0) {
-        fprintf(stderr, "invalid session: %s\n", optarg);
-        exit(EXIT_FAILURE);
-      }
+      if (optarg == p || *p != '\0' || session_id <= 0)
+        return usage_error(argv[0], "invalid session: %s", optarg);
       break;
+    case ':':
+      return usage_error(argv[0], "option requires an argument: %s",
+                         argv[optind - 1]);
+    case '?':
+      return usage_error(argv[0], "unknown option or invalid use: %s",
+                         argv[optind - 1]);
     default:
-      exit(EXIT_FAILURE);
+      return usage_error(argv[0], "invalid command-line usage");
     }
   }
 
+  if (help_requested) {
+    print_help(stdout, argv[0], help_format);
+    return EXIT_SUCCESS;
+  }
+
   if (ofile && afile) {
-    fprintf(stderr, "output and append options are exclusive\n");
-    exit(EXIT_FAILURE);
+    return usage_error(argv[0], "output and append options are exclusive");
   }
 
     if ((attach_requested != 0) + (create_requested != 0) +
@@ -1529,8 +1718,7 @@ int main(int argc, char *const argv[]) {
           (buffer_info_requested != 0) + (recv_requested != 0) +
           (send_data != NULL) >
       1) {
-    fprintf(stderr, "select only one management operation\n");
-    exit(EXIT_FAILURE);
+    return usage_error(argv[0], "select only one management operation");
   }
 
     if (attach_requested || create_requested || daemon_status_requested ||
@@ -1541,18 +1729,18 @@ int main(int argc, char *const argv[]) {
     if ((ifile || ofile || afile ||
          ((opt_cols > 0 || opt_lines > 0) && !resize_requested)) &&
         !attach_requested) {
-      fprintf(stderr, "run options are not supported with management operations\n");
-      exit(EXIT_FAILURE);
+      return usage_error(
+          argv[0],
+          "run options are not supported with management operations");
     }
     if (!create_requested && optind != argc) {
-      fprintf(stderr,
-              "management operations do not accept environment or command arguments\n");
-      exit(EXIT_FAILURE);
+      return usage_error(
+          argv[0],
+          "management operations do not accept environment or command arguments");
     }
     if (create_requested) {
       if (session_id != PTYTERM_SESSION_ALL) {
-        fprintf(stderr, "--create does not accept --session\n");
-        exit(EXIT_FAILURE);
+        return usage_error(argv[0], "--create does not accept --session");
       }
       return run_create_client(socket_path, argc - optind, argv + optind,
                                status_format);
@@ -1564,8 +1752,8 @@ int main(int argc, char *const argv[]) {
     if (list_requested)
       return run_list_client(socket_path, session_id);
     if (session_id == PTYTERM_SESSION_ALL) {
-      fprintf(stderr, "this management operation requires --session=ID\n");
-      exit(EXIT_FAILURE);
+      return usage_error(argv[0],
+                         "this management operation requires --session=ID");
     }
     if (attach_requested)
       return run_attach_client(socket_path, session_id, ifd, ofd);
@@ -1573,8 +1761,8 @@ int main(int argc, char *const argv[]) {
       return run_detach_client(socket_path, session_id, status_format);
     if (resize_requested) {
       if (opt_cols <= 0 || opt_lines <= 0) {
-        fprintf(stderr, "--resize requires --rows=N and --cols=N\n");
-        exit(EXIT_FAILURE);
+        return usage_error(argv[0],
+                           "--resize requires --rows=N and --cols=N");
       }
       return run_resize_client(socket_path, session_id, (uint16_t)opt_lines,
                                (uint16_t)opt_cols, status_format);
