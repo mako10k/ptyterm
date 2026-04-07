@@ -30,6 +30,18 @@ printf '%s\n' "$out" | grep -q -- "--create" || {
   exit 1
 }
 
+printf '%s\n' "$out" | grep -q -- "--daemon-status" || {
+  echo "ptyterm -h: expected daemon-status option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--daemon-stop" || {
+  echo "ptyterm -h: expected daemon-stop option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
 printf '%s\n' "$out" | grep -q -- "--attach" || {
   echo "ptyterm -h: expected attach option in output" >&2
   printf '%s\n' "$out" >&2

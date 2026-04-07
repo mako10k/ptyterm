@@ -29,6 +29,10 @@ enum ptyterm_message_type {
   PTYTERM_MESSAGE_DETACH_RESPONSE = 15,
   PTYTERM_MESSAGE_RESIZE_REQUEST = 16,
   PTYTERM_MESSAGE_RESIZE_RESPONSE = 17,
+  PTYTERM_MESSAGE_DAEMON_STATUS_REQUEST = 18,
+  PTYTERM_MESSAGE_DAEMON_STATUS_RESPONSE = 19,
+  PTYTERM_MESSAGE_DAEMON_SHUTDOWN_REQUEST = 20,
+  PTYTERM_MESSAGE_DAEMON_SHUTDOWN_RESPONSE = 21,
 };
 
 enum ptyterm_session_state {
@@ -142,6 +146,16 @@ struct ptyterm_resize_response {
   uint32_t session_id;
   uint16_t rows;
   uint16_t cols;
+};
+
+struct ptyterm_daemon_status_response {
+  uint32_t running;
+  int32_t daemon_pid;
+};
+
+struct ptyterm_daemon_shutdown_response {
+  uint32_t stopping;
+  int32_t daemon_pid;
 };
 
 struct ptyterm_error_response {

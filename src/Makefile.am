@@ -10,6 +10,7 @@ ptytermd_SOURCES = ptytermd.c ptyterm-control.c
 
 TESTS = \
 	test-ptyterm-help.sh \
+	test-ptyterm-daemon-lifecycle.sh \
 	test-ptyterm-attach-nonblock.sh \
 	test-ptyterm-attach-resize.sh \
 	test-ptytermd-help.sh \

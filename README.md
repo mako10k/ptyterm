@@ -78,6 +78,15 @@ Usage examples
 ./src/ptyterm
 ```
 
+Daemon-backed management auto-starts `ptytermd` when needed:
+
+```sh
+./src/ptyterm --create -- bash -lc 'echo hello; sleep 30'
+./src/ptyterm --list
+./src/ptyterm --daemon-status
+./src/ptyterm --daemon-stop
+```
+
 Run a command:
 
 ```sh
