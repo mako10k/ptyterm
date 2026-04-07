@@ -25,6 +25,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 static struct termios saved_termios;
@@ -54,6 +55,8 @@ static void restore_termios_handler(void);
 static void attach_size_changed(int sig);
 static int parse_status_format(const char *value);
 static int parse_help_format(const char *value);
+static int parse_duration_ms(const char *value, uint64_t *duration_ms_out);
+static int monotonic_time_ms(uint64_t *time_ms_out);
 static void print_help(FILE *out, const char *program_name, int help_format);
 static int usage_error(const char *program_name, const char *fmt, ...);
 static void print_create_status(const struct ptyterm_create_response *response,
@@ -68,6 +71,9 @@ static void print_daemon_status(int running, int daemon_pid,
                 int status_format);
 static void print_daemon_stop_status(int stopping, int daemon_pid,
                    int status_format);
+static void print_recv_status_line(uint32_t returned_bytes, uint64_t start_offset,
+                                   uint64_t end_offset, uint64_t next_recv_offset,
+                                   int truncated, const char *reason);
 
 static int set_nonblocking(int fd) {
   int flags;
@@ -94,6 +100,67 @@ static int parse_help_format(const char *value) {
   if (strcmp(value, "yaml") == 0)
     return PTYTERM_HELP_FORMAT_YAML;
   return -1;
+}
+
+static int parse_duration_ms(const char *value, uint64_t *duration_ms_out) {
+  char *end;
+  unsigned long long number;
+  uint64_t multiplier;
+
+  errno = 0;
+  number = strtoull(value, &end, 0);
+  if (errno != 0 || value == end || number == 0)
+    return -1;
+
+  if (strcmp(end, "ms") == 0)
+    multiplier = 1;
+  else if (strcmp(end, "s") == 0)
+    multiplier = 1000;
+  else
+    return -1;
+
+  if (number > UINT64_MAX / multiplier)
+    return -1;
+
+  *duration_ms_out = (uint64_t)number * multiplier;
+  return 0;
+}
+
+static int monotonic_time_ms(uint64_t *time_ms_out) {
+  struct timespec ts;
+
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) == -1)
+    return -1;
+  *time_ms_out = (uint64_t)ts.tv_sec * 1000u +
+                 (uint64_t)ts.tv_nsec / 1000000u;
+  return 0;
+}
+
+static const char *find_bytes(const char *haystack, size_t haystack_size,
+                              const char *needle, size_t needle_size) {
+  size_t offset;
+
+  if (needle_size == 0)
+    return haystack;
+  if (needle_size > haystack_size)
+    return NULL;
+
+  for (offset = 0; offset + needle_size <= haystack_size; ++offset) {
+    if (memcmp(haystack + offset, needle, needle_size) == 0)
+      return haystack + offset;
+  }
+  return NULL;
+}
+
+static void print_recv_status_line(uint32_t returned_bytes, uint64_t start_offset,
+                                   uint64_t end_offset, uint64_t next_recv_offset,
+                                   int truncated, const char *reason) {
+  fprintf(stderr,
+          "recv %u bytes; offsets %llu..%llu; next-offset=%llu; truncated=%s; reason=%s\n",
+          returned_bytes, (unsigned long long)start_offset,
+          (unsigned long long)end_offset,
+          (unsigned long long)next_recv_offset,
+          truncated ? "yes" : "no", reason);
 }
 
 static void print_help_discovery(FILE *out, const char *program_name) {
@@ -132,6 +199,8 @@ static void print_text_help(FILE *out, const char *program_name) {
   fprintf(out, "      --send=DATA     : send decoded bytes to one session\n");
   fprintf(out, "      --recv          : receive buffered output from one session\n");
   fprintf(out, "      --recv-size=N   : maximum bytes returned by --recv\n");
+  fprintf(out, "      --recv-timeout=DURATION : wait up to DURATION (ms|s) for recv\n");
+  fprintf(out, "      --recv-until=STRING : wait until unread output contains STRING\n");
   fprintf(out, "      --peek          : inspect buffered output without advancing recv\n");
   fprintf(out, "      --session=ID    : select one session for management operations\n");
   fprintf(out, "      --rows=N        : rows for --resize (alias: --lines)\n");
@@ -260,6 +329,16 @@ static void print_yaml_help(FILE *out, const char *program_name) {
   fprintf(out, "      requires: [--recv]\n");
   fprintf(out, "      default: 4096\n");
   fprintf(out, "      description: Maximum bytes returned by recv.\n");
+  fprintf(out, "    - long: --recv-timeout\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: DURATION\n");
+  fprintf(out, "      requires: [--recv]\n");
+  fprintf(out, "      description: Wait up to the requested duration for recv data or a pattern match.\n");
+  fprintf(out, "    - long: --recv-until\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: STRING\n");
+  fprintf(out, "      requires: [--recv]\n");
+  fprintf(out, "      description: Return once unread output contains the fixed string.\n");
   fprintf(out, "    - long: --session\n");
   fprintf(out, "      short: -S\n");
   fprintf(out, "      argument: ID\n");
@@ -881,14 +960,14 @@ static int run_send_client(const char *socket_path, int session_id,
   return response->unsent_bytes == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-static int run_recv_client(const char *socket_path, int session_id,
-                           uint32_t recv_size, int recv_peek) {
+static int request_recv_client(const char *socket_path, int session_id,
+                               uint32_t recv_size, int recv_peek,
+                               char *payload, size_t payload_capacity,
+                               const struct ptyterm_recv_response **response_out) {
   char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
-  char payload[8192];
   struct ptyterm_recv_request request;
   struct ptyterm_message_header header;
   const struct ptyterm_recv_response *response;
-  const char *data;
   ssize_t payload_size;
   int fd;
 
@@ -908,7 +987,7 @@ static int run_recv_client(const char *socket_path, int session_id,
     return EXIT_FAILURE;
   }
 
-  payload_size = ptyterm_recv_message(fd, &header, payload, sizeof(payload));
+  payload_size = ptyterm_recv_message(fd, &header, payload, payload_capacity);
   if (payload_size == -1) {
     perror("recv");
     close(fd);
@@ -935,20 +1014,113 @@ static int run_recv_client(const char *socket_path, int session_id,
     return EXIT_FAILURE;
   }
 
+  *response_out = response;
+  return EXIT_SUCCESS;
+}
+
+static int print_recv_payload_and_status(
+  const struct ptyterm_recv_response *response, const char *reason_override) {
+  const char *data;
+
   data = (const char *)(response + 1);
   if (response->returned_bytes > 0 &&
       fwrite(data, 1, response->returned_bytes, stdout) != response->returned_bytes) {
     perror("fwrite");
     return EXIT_FAILURE;
   }
-  fprintf(stderr,
-          "recv %u bytes; offsets %llu..%llu; next-offset=%llu; truncated=%s; reason=%s\n",
-          response->returned_bytes,
-          (unsigned long long)response->start_offset,
-          (unsigned long long)response->end_offset,
-          (unsigned long long)response->next_recv_offset,
-          response->truncated ? "yes" : "no", response->reason);
+
+  print_recv_status_line(response->returned_bytes, response->start_offset,
+                         response->end_offset, response->next_recv_offset,
+                         response->truncated,
+                         reason_override != NULL ? reason_override
+                                                 : response->reason);
   return EXIT_SUCCESS;
+}
+
+static int run_recv_client(const char *socket_path, int session_id,
+                           uint32_t recv_size, int recv_peek,
+                           uint64_t recv_timeout_ms,
+                           const char *recv_until) {
+  char payload[8192];
+  const struct ptyterm_recv_response *response;
+  uint64_t deadline_ms = 0;
+  size_t until_size;
+
+  if (recv_until == NULL && recv_timeout_ms == 0)
+    return request_recv_client(socket_path, session_id, recv_size, recv_peek,
+                               payload, sizeof(payload), &response) == EXIT_SUCCESS
+               ? print_recv_payload_and_status(response, NULL)
+               : EXIT_FAILURE;
+
+  until_size = recv_until == NULL ? 0 : strlen(recv_until);
+  if (recv_timeout_ms > 0) {
+    uint64_t start_ms;
+
+    if (monotonic_time_ms(&start_ms) == -1) {
+      perror("clock_gettime");
+      return EXIT_FAILURE;
+    }
+    deadline_ms = start_ms + recv_timeout_ms;
+  }
+
+  for (;;) {
+    const char *data;
+    const char *match;
+    uint32_t consume_size;
+    uint64_t now_ms;
+
+    if (request_recv_client(socket_path, session_id, recv_size, 1, payload,
+                            sizeof(payload), &response) != EXIT_SUCCESS)
+      return EXIT_FAILURE;
+
+    data = (const char *)(response + 1);
+    match = recv_until == NULL
+                ? (response->returned_bytes > 0 ? data : NULL)
+                : find_bytes(data, response->returned_bytes, recv_until,
+                             until_size);
+
+    if (match != NULL) {
+      consume_size = recv_until == NULL
+                         ? response->returned_bytes
+                         : (uint32_t)((match - data) + until_size);
+      if (request_recv_client(socket_path, session_id, consume_size, recv_peek,
+                              payload, sizeof(payload), &response) !=
+          EXIT_SUCCESS)
+        return EXIT_FAILURE;
+      return print_recv_payload_and_status(
+          response, recv_until == NULL ? NULL : "match_reached");
+    }
+
+    if (recv_until != NULL && response->returned_bytes == recv_size) {
+      print_recv_status_line(response->returned_bytes, response->start_offset,
+                             response->end_offset, response->next_recv_offset,
+                             response->truncated, "size_reached");
+      return EXIT_FAILURE;
+    }
+
+    if (strcmp(response->reason, "session_exited") == 0) {
+      print_recv_status_line(response->returned_bytes, response->start_offset,
+                             response->end_offset, response->next_recv_offset,
+                             response->truncated, "session_exited");
+      return EXIT_FAILURE;
+    }
+
+    if (recv_timeout_ms > 0) {
+      if (monotonic_time_ms(&now_ms) == -1) {
+        perror("clock_gettime");
+        return EXIT_FAILURE;
+      }
+      if (now_ms >= deadline_ms) {
+        print_recv_status_line(response->returned_bytes, response->start_offset,
+                               response->end_offset,
+                               response->next_recv_offset,
+                               response->truncated, "timeout");
+        return EXIT_FAILURE;
+      }
+    }
+
+    usleep(100000);
+  }
 }
 
 static int run_detach_client(const char *socket_path, int session_id,
@@ -1558,6 +1730,8 @@ int main(int argc, char *const argv[]) {
   int help_format = PTYTERM_HELP_FORMAT_TEXT;
   int list_requested = 0;
   int recv_peek = 0;
+  const char *recv_until = NULL;
+  uint64_t recv_timeout_ms = 0;
   int resize_requested = 0;
   int recv_requested = 0;
   int status_format = PTYTERM_STATUS_FORMAT_KV;
@@ -1577,6 +1751,8 @@ int main(int argc, char *const argv[]) {
       OPT_SEND = 1000,
       OPT_RECV,
       OPT_RECV_SIZE,
+      OPT_RECV_TIMEOUT,
+      OPT_RECV_UNTIL,
       OPT_PEEK,
       OPT_DAEMON_STATUS,
       OPT_DAEMON_STOP,
@@ -1599,6 +1775,8 @@ int main(int argc, char *const argv[]) {
                        {"send", required_argument, NULL, OPT_SEND},
                        {"recv", no_argument, NULL, OPT_RECV},
                        {"recv-size", required_argument, NULL, OPT_RECV_SIZE},
+                       {"recv-timeout", required_argument, NULL, OPT_RECV_TIMEOUT},
+                       {"recv-until", required_argument, NULL, OPT_RECV_UNTIL},
                        {"peek", no_argument, NULL, OPT_PEEK},
                        {"socket", required_argument, NULL, 's'},
                        {"buffer-info", no_argument, NULL, 'B'},
@@ -1671,6 +1849,15 @@ int main(int argc, char *const argv[]) {
       if (optarg == p || *p != '\0' || recv_size == 0)
         return usage_error(argv[0], "invalid recv-size: %s", optarg);
       break;
+    case OPT_RECV_TIMEOUT:
+      if (parse_duration_ms(optarg, &recv_timeout_ms) == -1)
+        return usage_error(argv[0], "invalid recv-timeout: %s", optarg);
+      break;
+    case OPT_RECV_UNTIL:
+      if (*optarg == '\0')
+        return usage_error(argv[0], "recv-until must not be empty");
+      recv_until = optarg;
+      break;
     case 's':
       socket_path = optarg;
       break;
@@ -1726,6 +1913,8 @@ int main(int argc, char *const argv[]) {
 
   if (recv_peek && !recv_requested)
     return usage_error(argv[0], "--peek requires --recv");
+  if ((recv_timeout_ms != 0 || recv_until != NULL) && !recv_requested)
+    return usage_error(argv[0], "recv wait options require --recv");
 
   if ((attach_requested != 0) + (create_requested != 0) +
       (daemon_status_requested != 0) + (daemon_stop_requested != 0) +
@@ -1786,7 +1975,8 @@ int main(int argc, char *const argv[]) {
     if (send_data != NULL)
       return run_send_client(socket_path, session_id, send_data);
     if (recv_requested)
-      return run_recv_client(socket_path, session_id, recv_size, recv_peek);
+      return run_recv_client(socket_path, session_id, recv_size, recv_peek,
+                             recv_timeout_ms, recv_until);
     return run_buffer_info_client(socket_path, session_id, status_format);
   }
 
