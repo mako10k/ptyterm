@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <limits.h>
 #include <locale.h>
 #include <ctype.h>
 #include <pty.h>
@@ -28,8 +29,15 @@
 static struct termios saved_termios;
 static int g_ifd = -1;
 static volatile sig_atomic_t attach_resize_requested = 0;
+static const char *g_program_path = "ptyterm";
 
 static int set_nonblocking(int fd);
+static int resolve_socket_path(const char *socket_path,
+                               char *default_socket_path,
+                               const char **resolved_socket_path);
+static int connect_daemon_socket(const char *socket_path,
+                                 char *default_socket_path,
+                                 int auto_start);
 static void save_termios(int fd);
 static void restore_termios_handler(void);
 static void attach_size_changed(int sig);
@@ -43,6 +51,117 @@ static int set_nonblocking(int fd) {
   if ((flags & O_NONBLOCK) != 0)
     return 0;
   return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+static int resolve_socket_path(const char *socket_path,
+                               char *default_socket_path,
+                               const char **resolved_socket_path) {
+  if (socket_path == NULL) {
+    if (ptyterm_default_socket_path(default_socket_path,
+                                    PTYTERM_SOCKET_PATH_MAX) == -1) {
+      return -1;
+    }
+    socket_path = default_socket_path;
+  }
+
+  *resolved_socket_path = socket_path;
+  return 0;
+}
+
+static int can_autostart_daemon(int errnum) {
+  return errnum == ENOENT || errnum == ECONNREFUSED;
+}
+
+static int wait_for_daemon_socket(const char *socket_path) {
+  int attempt;
+
+  for (attempt = 0; attempt < 50; ++attempt) {
+    int fd;
+
+    fd = ptyterm_connect_socket(socket_path);
+    if (fd != -1)
+      return fd;
+    if (errno != ENOENT && errno != ECONNREFUSED)
+      return -1;
+    usleep(100000);
+  }
+
+  errno = ETIMEDOUT;
+  return -1;
+}
+
+static int start_daemon_process(const char *socket_path) {
+  pid_t pid;
+
+  pid = fork();
+  if (pid == -1)
+    return -1;
+  if (pid == 0) {
+    const char *daemon_argv[4];
+    char daemon_path[PATH_MAX];
+    const char *daemon_program;
+    const char *slash;
+    int devnull;
+
+    if (setsid() == -1)
+      _exit(127);
+
+    devnull = open("/dev/null", O_RDWR);
+    if (devnull == -1)
+      _exit(127);
+    if (dup2(devnull, STDIN_FILENO) == -1 ||
+        dup2(devnull, STDOUT_FILENO) == -1 ||
+        dup2(devnull, STDERR_FILENO) == -1) {
+      _exit(127);
+    }
+    if (devnull > STDERR_FILENO)
+      close(devnull);
+
+    daemon_program = "ptytermd";
+    slash = strrchr(g_program_path, '/');
+    if (slash != NULL) {
+      size_t prefix_size;
+
+      prefix_size = (size_t)(slash - g_program_path + 1);
+      if (prefix_size + strlen("ptytermd") + 1 > sizeof(daemon_path))
+        _exit(127);
+      memcpy(daemon_path, g_program_path, prefix_size);
+      strcpy(daemon_path + prefix_size, "ptytermd");
+      daemon_program = daemon_path;
+    }
+
+    daemon_argv[0] = daemon_program;
+    daemon_argv[1] = "--socket";
+    daemon_argv[2] = socket_path;
+    daemon_argv[3] = NULL;
+
+    if (slash != NULL)
+      execv(daemon_program, (char *const *)daemon_argv);
+    execvp(daemon_program, (char *const *)daemon_argv);
+    _exit(127);
+  }
+
+  return wait_for_daemon_socket(socket_path);
+}
+
+static int connect_daemon_socket(const char *socket_path,
+                                 char *default_socket_path,
+                                 int auto_start) {
+  const char *resolved_socket_path;
+  int fd;
+
+  if (resolve_socket_path(socket_path, default_socket_path,
+                          &resolved_socket_path) == -1) {
+    return -1;
+  }
+
+  fd = ptyterm_connect_socket(resolved_socket_path);
+  if (fd != -1)
+    return fd;
+  if (!auto_start || !can_autostart_daemon(errno))
+    return -1;
+
+  return start_daemon_process(resolved_socket_path);
 }
 
 static int print_list_response(const void *payload, size_t payload_size) {
@@ -86,16 +205,7 @@ static int run_list_client(const char *socket_path, int session_id) {
   ssize_t payload_size;
   int fd;
 
-  if (socket_path == NULL) {
-    if (ptyterm_default_socket_path(default_socket_path,
-                                    sizeof(default_socket_path)) == -1) {
-      perror("default socket path");
-      return EXIT_FAILURE;
-    }
-    socket_path = default_socket_path;
-  }
-
-  fd = ptyterm_connect_socket(socket_path);
+  fd = connect_daemon_socket(socket_path, default_socket_path, 1);
   if (fd == -1) {
     perror(socket_path);
     return EXIT_FAILURE;
@@ -145,16 +255,7 @@ static int run_buffer_info_client(const char *socket_path, int session_id) {
   ssize_t payload_size;
   int fd;
 
-  if (socket_path == NULL) {
-    if (ptyterm_default_socket_path(default_socket_path,
-                                    sizeof(default_socket_path)) == -1) {
-      perror("default socket path");
-      return EXIT_FAILURE;
-    }
-    socket_path = default_socket_path;
-  }
-
-  fd = ptyterm_connect_socket(socket_path);
+  fd = connect_daemon_socket(socket_path, default_socket_path, 1);
   if (fd == -1) {
     perror(socket_path);
     return EXIT_FAILURE;
@@ -222,15 +323,6 @@ static int run_create_client(const char *socket_path, int cmd_argc,
   int fd;
   int i;
 
-  if (socket_path == NULL) {
-    if (ptyterm_default_socket_path(default_socket_path,
-                                    sizeof(default_socket_path)) == -1) {
-      perror("default socket path");
-      return EXIT_FAILURE;
-    }
-    socket_path = default_socket_path;
-  }
-
   request = (struct ptyterm_create_request *)payload;
   request->argc = (uint32_t)cmd_argc;
   offset = sizeof(*request);
@@ -246,7 +338,7 @@ static int run_create_client(const char *socket_path, int cmd_argc,
     offset += arg_size;
   }
 
-  fd = ptyterm_connect_socket(socket_path);
+  fd = connect_daemon_socket(socket_path, default_socket_path, 1);
   if (fd == -1) {
     perror(socket_path);
     return EXIT_FAILURE;
@@ -411,15 +503,6 @@ static int run_send_client(const char *socket_path, int session_id,
   ssize_t payload_size;
   int fd;
 
-  if (socket_path == NULL) {
-    if (ptyterm_default_socket_path(default_socket_path,
-                                    sizeof(default_socket_path)) == -1) {
-      perror("default socket path");
-      return EXIT_FAILURE;
-    }
-    socket_path = default_socket_path;
-  }
-
   data_size = decode_send_data(send_data, decoded, sizeof(decoded));
   if (sizeof(*request) + data_size > sizeof(payload)) {
     fprintf(stderr, "send request too large\n");
@@ -431,7 +514,7 @@ static int run_send_client(const char *socket_path, int session_id,
   request->data_size = (uint32_t)data_size;
   memcpy(request + 1, decoded, data_size);
 
-  fd = ptyterm_connect_socket(socket_path);
+  fd = connect_daemon_socket(socket_path, default_socket_path, 1);
   if (fd == -1) {
     perror(socket_path);
     return EXIT_FAILURE;
@@ -484,18 +567,9 @@ static int run_recv_client(const char *socket_path, int session_id,
   ssize_t payload_size;
   int fd;
 
-  if (socket_path == NULL) {
-    if (ptyterm_default_socket_path(default_socket_path,
-                                    sizeof(default_socket_path)) == -1) {
-      perror("default socket path");
-      return EXIT_FAILURE;
-    }
-    socket_path = default_socket_path;
-  }
-
   request.session_id = session_id;
   request.max_bytes = recv_size;
-  fd = ptyterm_connect_socket(socket_path);
+  fd = connect_daemon_socket(socket_path, default_socket_path, 1);
   if (fd == -1) {
     perror(socket_path);
     return EXIT_FAILURE;
@@ -560,17 +634,8 @@ static int run_detach_client(const char *socket_path, int session_id) {
   ssize_t payload_size;
   int fd;
 
-  if (socket_path == NULL) {
-    if (ptyterm_default_socket_path(default_socket_path,
-                                    sizeof(default_socket_path)) == -1) {
-      perror("default socket path");
-      return EXIT_FAILURE;
-    }
-    socket_path = default_socket_path;
-  }
-
   request.session_id = session_id;
-  fd = ptyterm_connect_socket(socket_path);
+  fd = connect_daemon_socket(socket_path, default_socket_path, 1);
   if (fd == -1) {
     perror(socket_path);
     return EXIT_FAILURE;
@@ -621,21 +686,12 @@ static int request_resize_client(const char *socket_path, int session_id,
   ssize_t payload_size;
   int fd;
 
-  if (socket_path == NULL) {
-    if (ptyterm_default_socket_path(default_socket_path,
-                                    sizeof(default_socket_path)) == -1) {
-      perror("default socket path");
-      return -1;
-    }
-    socket_path = default_socket_path;
-  }
-
   memset(&request, 0, sizeof(request));
   request.session_id = session_id;
   request.rows = rows;
   request.cols = cols;
 
-  fd = ptyterm_connect_socket(socket_path);
+  fd = connect_daemon_socket(socket_path, default_socket_path, 1);
   if (fd == -1)
     return -1;
 
@@ -710,6 +766,96 @@ static void attach_size_changed(int sig) {
   attach_resize_requested = 1;
 }
 
+static int run_daemon_status_client(const char *socket_path) {
+  char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
+  char payload[4096];
+  struct ptyterm_message_header header;
+  const struct ptyterm_daemon_status_response *response;
+  ssize_t payload_size;
+  int fd;
+
+  fd = connect_daemon_socket(socket_path, default_socket_path, 0);
+  if (fd == -1) {
+    if (can_autostart_daemon(errno)) {
+      printf("running=no\n");
+      printf("daemon_pid=0\n");
+      return EXIT_SUCCESS;
+    }
+    perror(socket_path);
+    return EXIT_FAILURE;
+  }
+
+  if (ptyterm_send_message(fd, PTYTERM_MESSAGE_DAEMON_STATUS_REQUEST, NULL, 0) == -1) {
+    perror("send");
+    close(fd);
+    return EXIT_FAILURE;
+  }
+
+  payload_size = ptyterm_recv_message(fd, &header, payload, sizeof(payload));
+  if (payload_size == -1) {
+    perror("recv");
+    close(fd);
+    return EXIT_FAILURE;
+  }
+  close(fd);
+
+  if (header.type != PTYTERM_MESSAGE_DAEMON_STATUS_RESPONSE ||
+      (size_t)payload_size != sizeof(*response)) {
+    fprintf(stderr, "invalid daemon-status response\n");
+    return EXIT_FAILURE;
+  }
+
+  response = (const struct ptyterm_daemon_status_response *)payload;
+  printf("running=%s\n", response->running ? "yes" : "no");
+  printf("daemon_pid=%d\n", response->daemon_pid);
+  return EXIT_SUCCESS;
+}
+
+static int run_daemon_stop_client(const char *socket_path) {
+  char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
+  char payload[4096];
+  struct ptyterm_message_header header;
+  const struct ptyterm_daemon_shutdown_response *response;
+  ssize_t payload_size;
+  int fd;
+
+  fd = connect_daemon_socket(socket_path, default_socket_path, 0);
+  if (fd == -1) {
+    if (can_autostart_daemon(errno)) {
+      printf("stopping=no\n");
+      printf("daemon_pid=0\n");
+      return EXIT_SUCCESS;
+    }
+    perror(socket_path);
+    return EXIT_FAILURE;
+  }
+
+  if (ptyterm_send_message(fd, PTYTERM_MESSAGE_DAEMON_SHUTDOWN_REQUEST, NULL, 0) == -1) {
+    perror("send");
+    close(fd);
+    return EXIT_FAILURE;
+  }
+
+  payload_size = ptyterm_recv_message(fd, &header, payload, sizeof(payload));
+  if (payload_size == -1) {
+    perror("recv");
+    close(fd);
+    return EXIT_FAILURE;
+  }
+  close(fd);
+
+  if (header.type != PTYTERM_MESSAGE_DAEMON_SHUTDOWN_RESPONSE ||
+      (size_t)payload_size != sizeof(*response)) {
+    fprintf(stderr, "invalid daemon-stop response\n");
+    return EXIT_FAILURE;
+  }
+
+  response = (const struct ptyterm_daemon_shutdown_response *)payload;
+  printf("stopping=%s\n", response->stopping ? "yes" : "no");
+  printf("daemon_pid=%d\n", response->daemon_pid);
+  return EXIT_SUCCESS;
+}
+
 static int run_attach_client(const char *socket_path, int session_id, int ifd,
                              int ofd) {
   char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
@@ -726,17 +872,8 @@ static int run_attach_client(const char *socket_path, int session_id, int ifd,
   size_t size_in;
   size_t size_out;
 
-  if (socket_path == NULL) {
-    if (ptyterm_default_socket_path(default_socket_path,
-                                    sizeof(default_socket_path)) == -1) {
-      perror("default socket path");
-      return EXIT_FAILURE;
-    }
-    socket_path = default_socket_path;
-  }
-
   request.session_id = session_id;
-  fd = ptyterm_connect_socket(socket_path);
+  fd = connect_daemon_socket(socket_path, default_socket_path, 1);
   if (fd == -1) {
     perror(socket_path);
     return EXIT_FAILURE;
@@ -1092,6 +1229,8 @@ int main(int argc, char *const argv[]) {
   int buffer_info_requested = 0;
   int attach_requested = 0;
   int create_requested = 0;
+  int daemon_status_requested = 0;
+  int daemon_stop_requested = 0;
   int detach_requested = 0;
   int list_requested = 0;
   int resize_requested = 0;
@@ -1099,6 +1238,8 @@ int main(int argc, char *const argv[]) {
   const char *send_data = NULL;
   uint32_t recv_size = 4096;
   int session_id = PTYTERM_SESSION_ALL;
+
+  g_program_path = argv[0];
 
   setlocale(LC_ALL, "");
   while (1) {
@@ -1110,6 +1251,8 @@ int main(int argc, char *const argv[]) {
       OPT_SEND = 1000,
       OPT_RECV,
       OPT_RECV_SIZE,
+      OPT_DAEMON_STATUS,
+      OPT_DAEMON_STOP,
     };
 
     char *p;
@@ -1118,6 +1261,8 @@ int main(int argc, char *const argv[]) {
                        {"help", no_argument, NULL, 'h'},
                {"attach", no_argument, NULL, 'A'},
                        {"create", no_argument, NULL, 'C'},
+                     {"daemon-status", no_argument, NULL, OPT_DAEMON_STATUS},
+                     {"daemon-stop", no_argument, NULL, OPT_DAEMON_STOP},
                {"detach", no_argument, NULL, 'D'},
                        {"resize", no_argument, NULL, 'R'},
                        {"send", required_argument, NULL, OPT_SEND},
@@ -1167,6 +1312,8 @@ int main(int argc, char *const argv[]) {
       printf("Management options:\n");
       printf("  -A, --attach        : attach to one daemon-managed session\n");
       printf("  -C, --create        : create a daemon-managed session\n");
+      printf("      --daemon-status : report whether the daemon is running\n");
+      printf("      --daemon-stop   : request graceful daemon shutdown\n");
       printf("  -D, --detach        : detach one attached daemon-managed session\n");
       printf("  -R, --resize        : resize one daemon-managed session\n");
       printf("  -L, --list          : list daemon-managed sessions\n");
@@ -1189,6 +1336,12 @@ int main(int argc, char *const argv[]) {
       break;
     case 'C':
       create_requested = 1;
+      break;
+    case OPT_DAEMON_STATUS:
+      daemon_status_requested = 1;
+      break;
+    case OPT_DAEMON_STOP:
+      daemon_stop_requested = 1;
       break;
     case 'D':
       detach_requested = 1;
@@ -1258,7 +1411,8 @@ int main(int argc, char *const argv[]) {
     exit(EXIT_FAILURE);
   }
 
-  if ((attach_requested != 0) + (create_requested != 0) +
+    if ((attach_requested != 0) + (create_requested != 0) +
+      (daemon_status_requested != 0) + (daemon_stop_requested != 0) +
       (detach_requested != 0) + (list_requested != 0) +
       (resize_requested != 0) +
           (buffer_info_requested != 0) + (recv_requested != 0) +
@@ -1268,7 +1422,8 @@ int main(int argc, char *const argv[]) {
     exit(EXIT_FAILURE);
   }
 
-  if (attach_requested || create_requested || detach_requested ||
+    if (attach_requested || create_requested || daemon_status_requested ||
+      daemon_stop_requested || detach_requested ||
       resize_requested ||
       list_requested || buffer_info_requested ||
       recv_requested || send_data != NULL) {
@@ -1290,6 +1445,10 @@ int main(int argc, char *const argv[]) {
       }
       return run_create_client(socket_path, argc - optind, argv + optind);
     }
+    if (daemon_status_requested)
+      return run_daemon_status_client(socket_path);
+    if (daemon_stop_requested)
+      return run_daemon_stop_client(socket_path);
     if (list_requested)
       return run_list_client(socket_path, session_id);
     if (session_id == PTYTERM_SESSION_ALL) {

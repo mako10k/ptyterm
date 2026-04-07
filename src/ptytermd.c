@@ -898,6 +898,45 @@ static int handle_resize_request(int client_fd, struct ptyterm_daemon_state *sta
                               &response, sizeof(response));
 }
 
+static int handle_daemon_status_request(int client_fd, const void *payload,
+                                        size_t payload_size) {
+  struct ptyterm_daemon_status_response response;
+
+  (void)payload;
+  if (payload_size != 0) {
+    errno = EPROTO;
+    return -1;
+  }
+
+  memset(&response, 0, sizeof(response));
+  response.running = 1;
+  response.daemon_pid = (int32_t)getpid();
+  return ptyterm_send_message(client_fd, PTYTERM_MESSAGE_DAEMON_STATUS_RESPONSE,
+                              &response, sizeof(response));
+}
+
+static int handle_daemon_shutdown_request(int client_fd, const void *payload,
+                                          size_t payload_size) {
+  struct ptyterm_daemon_shutdown_response response;
+
+  (void)payload;
+  if (payload_size != 0) {
+    errno = EPROTO;
+    return -1;
+  }
+
+  memset(&response, 0, sizeof(response));
+  response.stopping = 1;
+  response.daemon_pid = (int32_t)getpid();
+  if (ptyterm_send_message(client_fd, PTYTERM_MESSAGE_DAEMON_SHUTDOWN_RESPONSE,
+                           &response, sizeof(response)) == -1) {
+    return -1;
+  }
+
+  stop_requested = 1;
+  return 0;
+}
+
 static int handle_create_request(int client_fd, struct ptyterm_daemon_state *state,
                                  const void *payload, size_t payload_size) {
   const struct ptyterm_create_request *request;
@@ -1050,6 +1089,18 @@ static int handle_client(int client_fd, struct ptyterm_daemon_state *state) {
       } else {
         send_error_response(client_fd, errno, strerror(errno));
       }
+    }
+    return 0;
+  case PTYTERM_MESSAGE_DAEMON_STATUS_REQUEST:
+    if (handle_daemon_status_request(client_fd, payload,
+                                     (size_t)payload_size) == -1) {
+      send_error_response(client_fd, errno, strerror(errno));
+    }
+    return 0;
+  case PTYTERM_MESSAGE_DAEMON_SHUTDOWN_REQUEST:
+    if (handle_daemon_shutdown_request(client_fd, payload,
+                                       (size_t)payload_size) == -1) {
+      send_error_response(client_fd, errno, strerror(errno));
     }
     return 0;
   default:
