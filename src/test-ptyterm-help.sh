@@ -11,3 +11,57 @@ printf '%s\n' "$out" | grep -q "Usage" || {
   printf '%s\n' "$out" >&2
   exit 1
 }
+
+printf '%s\n' "$out" | grep -q -- "--stdin=FILE" || {
+  echo "ptyterm -h: expected canonical --stdin option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--stdout=FILE" || {
+  echo "ptyterm -h: expected canonical --stdout option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--create" || {
+  echo "ptyterm -h: expected create option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--attach" || {
+  echo "ptyterm -h: expected attach option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--detach" || {
+  echo "ptyterm -h: expected detach option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--resize" || {
+  echo "ptyterm -h: expected resize option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--send=DATA" || {
+  echo "ptyterm -h: expected send option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--recv" || {
+  echo "ptyterm -h: expected recv option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--rows=N" || {
+  echo "ptyterm -h: expected rows option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}

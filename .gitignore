@@ -13,6 +13,7 @@
 /stamp-h1
 /COPYING
 /INSTALL
+/build-validation/
 
 Makefile.in
 Makefile
@@ -25,5 +26,6 @@ Makefile
 
 src/biopen
 src/ptyterm
+src/ptytermd
 src/ptywrap
 src/pbuf
