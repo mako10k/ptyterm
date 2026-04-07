@@ -70,6 +70,63 @@ grep -q 'reason=match_reached' "$tmpdir/recv.err" || {
   exit 1
 }
 
+(
+  sleep 1
+  ./ptyterm --send='ready>' --session=1 --socket="$sock" >/dev/null 2>"$tmpdir/sender-no-timeout.err"
+) &
+sender_no_timeout_pid=$!
+
+./ptyterm --recv --recv-size=16 --recv-until='ready>' --session=1 --socket="$sock" >"$tmpdir/no-timeout.out" 2>"$tmpdir/no-timeout.err" || {
+  echo "ptyterm recv wait until ready> without timeout: expected success" >&2
+  cat "$tmpdir/no-timeout.err" >&2 || true
+  exit 1
+}
+
+printf 'ready>' | cmp - "$tmpdir/no-timeout.out" || {
+  echo "ptyterm recv wait until ready> without timeout: expected matched payload" >&2
+  od -An -tx1 "$tmpdir/no-timeout.out" >&2 || true
+  cat "$tmpdir/no-timeout.err" >&2 || true
+  exit 1
+}
+
+grep -q 'reason=match_reached' "$tmpdir/no-timeout.err" || {
+  echo "ptyterm recv wait until ready> without timeout: expected match_reached status" >&2
+  cat "$tmpdir/no-timeout.err" >&2 || true
+  exit 1
+}
+
+(
+  sleep 1
+  ./ptyterm --send='peek>' --session=1 --socket="$sock" >/dev/null 2>"$tmpdir/sender-peek.err"
+) &
+sender_peek_pid=$!
+
+./ptyterm --recv --peek --recv-size=16 --recv-timeout=2s --recv-until='peek>' --session=1 --socket="$sock" >"$tmpdir/peek.out" 2>"$tmpdir/peek.err" || {
+  echo "ptyterm recv wait with peek: expected success" >&2
+  cat "$tmpdir/peek.err" >&2 || true
+  exit 1
+}
+
+printf 'peek>' | cmp - "$tmpdir/peek.out" || {
+  echo "ptyterm recv wait with peek: expected matched payload" >&2
+  od -An -tx1 "$tmpdir/peek.out" >&2 || true
+  cat "$tmpdir/peek.err" >&2 || true
+  exit 1
+}
+
+./ptyterm --recv --recv-size=16 --session=1 --socket="$sock" >"$tmpdir/post-peek.out" 2>"$tmpdir/post-peek.err" || {
+  echo "ptyterm recv after peek wait: expected success" >&2
+  cat "$tmpdir/post-peek.err" >&2 || true
+  exit 1
+}
+
+printf 'peek>' | cmp - "$tmpdir/post-peek.out" || {
+  echo "ptyterm recv after peek wait: expected unread payload" >&2
+  od -An -tx1 "$tmpdir/post-peek.out" >&2 || true
+  cat "$tmpdir/post-peek.err" >&2 || true
+  exit 1
+}
+
 if ./ptyterm --recv --recv-size=16 --recv-timeout=200ms --recv-until='password:' --session=1 --socket="$sock" >"$tmpdir/timeout.out" 2>"$tmpdir/timeout.err"; then
   echo "ptyterm recv wait timeout: expected failure" >&2
   cat "$tmpdir/timeout.err" >&2 || true

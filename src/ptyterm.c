@@ -56,6 +56,7 @@ static void attach_size_changed(int sig);
 static int parse_status_format(const char *value);
 static int parse_help_format(const char *value);
 static int parse_duration_ms(const char *value, uint64_t *duration_ms_out);
+static int monotonic_time_ms(uint64_t *time_ms_out);
 static void print_help(FILE *out, const char *program_name, int help_format);
 static int usage_error(const char *program_name, const char *fmt, ...);
 static void print_create_status(const struct ptyterm_create_response *response,
@@ -125,12 +126,14 @@ static int parse_duration_ms(const char *value, uint64_t *duration_ms_out) {
   return 0;
 }
 
-static uint64_t monotonic_time_ms(void) {
+static int monotonic_time_ms(uint64_t *time_ms_out) {
   struct timespec ts;
 
   if (clock_gettime(CLOCK_MONOTONIC, &ts) == -1)
-    return 0;
-  return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+    return -1;
+  *time_ms_out = (uint64_t)ts.tv_sec * 1000u +
+                 (uint64_t)ts.tv_nsec / 1000000u;
+  return 0;
 }
 
 static const char *find_bytes(const char *haystack, size_t haystack_size,
@@ -1040,7 +1043,7 @@ static int run_recv_client(const char *socket_path, int session_id,
                            const char *recv_until) {
   char payload[8192];
   const struct ptyterm_recv_response *response;
-  uint64_t deadline_ms;
+  uint64_t deadline_ms = 0;
   size_t until_size;
 
   if (recv_until == NULL && recv_timeout_ms == 0)
@@ -1049,8 +1052,16 @@ static int run_recv_client(const char *socket_path, int session_id,
                ? print_recv_payload_and_status(response, NULL)
                : EXIT_FAILURE;
 
-  deadline_ms = recv_timeout_ms == 0 ? 0 : monotonic_time_ms() + recv_timeout_ms;
   until_size = recv_until == NULL ? 0 : strlen(recv_until);
+  if (recv_timeout_ms > 0) {
+    uint64_t start_ms;
+
+    if (monotonic_time_ms(&start_ms) == -1) {
+      perror("clock_gettime");
+      return EXIT_FAILURE;
+    }
+    deadline_ms = start_ms + recv_timeout_ms;
+  }
 
   for (;;) {
     const char *data;
@@ -1072,8 +1083,9 @@ static int run_recv_client(const char *socket_path, int session_id,
       consume_size = recv_until == NULL
                          ? response->returned_bytes
                          : (uint32_t)((match - data) + until_size);
-      if (request_recv_client(socket_path, session_id, consume_size, 0, payload,
-                              sizeof(payload), &response) != EXIT_SUCCESS)
+      if (request_recv_client(socket_path, session_id, consume_size, recv_peek,
+                              payload, sizeof(payload), &response) !=
+          EXIT_SUCCESS)
         return EXIT_FAILURE;
       return print_recv_payload_and_status(
           response, recv_until == NULL ? NULL : "match_reached");
@@ -1093,12 +1105,18 @@ static int run_recv_client(const char *socket_path, int session_id,
       return EXIT_FAILURE;
     }
 
-    now_ms = monotonic_time_ms();
-    if (recv_timeout_ms == 0 || now_ms >= deadline_ms) {
-      print_recv_status_line(response->returned_bytes, response->start_offset,
-                             response->end_offset, response->next_recv_offset,
-                             response->truncated, "timeout");
-      return EXIT_FAILURE;
+    if (recv_timeout_ms > 0) {
+      if (monotonic_time_ms(&now_ms) == -1) {
+        perror("clock_gettime");
+        return EXIT_FAILURE;
+      }
+      if (now_ms >= deadline_ms) {
+        print_recv_status_line(response->returned_bytes, response->start_offset,
+                               response->end_offset,
+                               response->next_recv_offset,
+                               response->truncated, "timeout");
+        return EXIT_FAILURE;
+      }
     }
 
     usleep(100000);
