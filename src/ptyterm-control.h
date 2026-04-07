@@ -41,6 +41,10 @@ enum ptyterm_session_state {
   PTYTERM_SESSION_EXITED = 3,
 };
 
+enum ptyterm_recv_flags {
+  PTYTERM_RECV_FLAG_PEEK = 1u << 0,
+};
+
 struct ptyterm_message_header {
   uint32_t magic;
   uint16_t version;
@@ -105,6 +109,7 @@ struct ptyterm_send_response {
 struct ptyterm_recv_request {
   int32_t session_id;
   uint32_t max_bytes;
+  uint32_t flags;
 };
 
 struct ptyterm_recv_response {

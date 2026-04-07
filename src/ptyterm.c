@@ -132,6 +132,7 @@ static void print_text_help(FILE *out, const char *program_name) {
   fprintf(out, "      --send=DATA     : send decoded bytes to one session\n");
   fprintf(out, "      --recv          : receive buffered output from one session\n");
   fprintf(out, "      --recv-size=N   : maximum bytes returned by --recv\n");
+  fprintf(out, "      --peek          : inspect buffered output without advancing recv\n");
   fprintf(out, "      --session=ID    : select one session for management operations\n");
   fprintf(out, "      --rows=N        : rows for --resize (alias: --lines)\n");
   fprintf(out, "      --cols=N        : cols for --resize\n");
@@ -248,6 +249,11 @@ static void print_yaml_help(FILE *out, const char *program_name) {
   fprintf(out, "      argument: none\n");
   fprintf(out, "      requires: [--session]\n");
   fprintf(out, "      description: Receive buffered output from one session.\n");
+  fprintf(out, "    - long: --peek\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      requires: [--recv]\n");
+  fprintf(out, "      description: Read buffered output without advancing the recv cursor.\n");
   fprintf(out, "    - long: --recv-size\n");
   fprintf(out, "      short: null\n");
   fprintf(out, "      argument: N\n");
@@ -876,7 +882,7 @@ static int run_send_client(const char *socket_path, int session_id,
 }
 
 static int run_recv_client(const char *socket_path, int session_id,
-                           uint32_t recv_size) {
+                           uint32_t recv_size, int recv_peek) {
   char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
   char payload[8192];
   struct ptyterm_recv_request request;
@@ -888,6 +894,7 @@ static int run_recv_client(const char *socket_path, int session_id,
 
   request.session_id = session_id;
   request.max_bytes = recv_size;
+  request.flags = recv_peek ? PTYTERM_RECV_FLAG_PEEK : 0;
   fd = connect_daemon_socket(socket_path, default_socket_path, 1);
   if (fd == -1) {
     perror(socket_path);
@@ -1550,6 +1557,7 @@ int main(int argc, char *const argv[]) {
   int help_requested = 0;
   int help_format = PTYTERM_HELP_FORMAT_TEXT;
   int list_requested = 0;
+  int recv_peek = 0;
   int resize_requested = 0;
   int recv_requested = 0;
   int status_format = PTYTERM_STATUS_FORMAT_KV;
@@ -1569,6 +1577,7 @@ int main(int argc, char *const argv[]) {
       OPT_SEND = 1000,
       OPT_RECV,
       OPT_RECV_SIZE,
+      OPT_PEEK,
       OPT_DAEMON_STATUS,
       OPT_DAEMON_STOP,
       OPT_HELP_FORMAT,
@@ -1590,6 +1599,7 @@ int main(int argc, char *const argv[]) {
                        {"send", required_argument, NULL, OPT_SEND},
                        {"recv", no_argument, NULL, OPT_RECV},
                        {"recv-size", required_argument, NULL, OPT_RECV_SIZE},
+                       {"peek", no_argument, NULL, OPT_PEEK},
                        {"socket", required_argument, NULL, 's'},
                        {"buffer-info", no_argument, NULL, 'B'},
                        {"list", no_argument, NULL, 'L'},
@@ -1653,6 +1663,9 @@ int main(int argc, char *const argv[]) {
     case OPT_RECV:
       recv_requested = 1;
       break;
+    case OPT_PEEK:
+      recv_peek = 1;
+      break;
     case OPT_RECV_SIZE:
       recv_size = (uint32_t)strtoul(optarg, &p, 0);
       if (optarg == p || *p != '\0' || recv_size == 0)
@@ -1711,7 +1724,10 @@ int main(int argc, char *const argv[]) {
     return usage_error(argv[0], "output and append options are exclusive");
   }
 
-    if ((attach_requested != 0) + (create_requested != 0) +
+  if (recv_peek && !recv_requested)
+    return usage_error(argv[0], "--peek requires --recv");
+
+  if ((attach_requested != 0) + (create_requested != 0) +
       (daemon_status_requested != 0) + (daemon_stop_requested != 0) +
       (detach_requested != 0) + (list_requested != 0) +
       (resize_requested != 0) +
@@ -1721,7 +1737,7 @@ int main(int argc, char *const argv[]) {
     return usage_error(argv[0], "select only one management operation");
   }
 
-    if (attach_requested || create_requested || daemon_status_requested ||
+  if (attach_requested || create_requested || daemon_status_requested ||
       daemon_stop_requested || detach_requested ||
       resize_requested ||
       list_requested || buffer_info_requested ||
@@ -1770,7 +1786,7 @@ int main(int argc, char *const argv[]) {
     if (send_data != NULL)
       return run_send_client(socket_path, session_id, send_data);
     if (recv_requested)
-      return run_recv_client(socket_path, session_id, recv_size);
+      return run_recv_client(socket_path, session_id, recv_size, recv_peek);
     return run_buffer_info_client(socket_path, session_id, status_format);
   }
 

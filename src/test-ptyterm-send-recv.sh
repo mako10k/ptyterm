@@ -7,6 +7,8 @@ daemon_pid=
 expected=$tmpdir/expected.bin
 received=$tmpdir/received.bin
 received2=$tmpdir/received2.bin
+peeked=$tmpdir/peeked.bin
+received3=$tmpdir/received3.bin
 
 cleanup() {
   if [ -n "${daemon_pid}" ] && kill -0 "$daemon_pid" 2>/dev/null; then
@@ -78,6 +80,50 @@ cmp "$expected" "$received" || {
 grep -q 'recv ' "$tmpdir/recv.err" || {
   echo "ptyterm --recv: expected status output on stderr" >&2
   cat "$tmpdir/recv.err" >&2 || true
+  exit 1
+}
+
+send_out=$(./ptyterm --send='ABC' --session=1 --socket="$sock" 2>&1) || {
+  echo "ptyterm second --send: expected success" >&2
+  printf '%s\n' "$send_out" >&2
+  exit 1
+}
+
+./ptyterm --recv --peek --recv-size=3 --session=1 --socket="$sock" >"$peeked" 2>"$tmpdir/peek.err" || {
+  echo "ptyterm --recv --peek: expected success" >&2
+  cat "$tmpdir/peek.err" >&2 || true
+  exit 1
+}
+
+cmp "$expected" "$peeked" || {
+  echo "ptyterm --recv --peek: expected exact byte payload" >&2
+  od -An -tx1 "$peeked" >&2 || true
+  cat "$tmpdir/peek.err" >&2 || true
+  exit 1
+}
+
+grep -q 'next-offset=3' "$tmpdir/peek.err" || {
+  echo "ptyterm --recv --peek: expected unchanged recv cursor" >&2
+  cat "$tmpdir/peek.err" >&2 || true
+  exit 1
+}
+
+./ptyterm --recv --recv-size=3 --session=1 --socket="$sock" >"$received3" 2>"$tmpdir/recv3.err" || {
+  echo "ptyterm recv after peek: expected success" >&2
+  cat "$tmpdir/recv3.err" >&2 || true
+  exit 1
+}
+
+cmp "$expected" "$received3" || {
+  echo "ptyterm recv after peek: expected same byte payload" >&2
+  od -An -tx1 "$received3" >&2 || true
+  cat "$tmpdir/recv3.err" >&2 || true
+  exit 1
+}
+
+grep -q 'next-offset=6' "$tmpdir/recv3.err" || {
+  echo "ptyterm recv after peek: expected advanced recv cursor" >&2
+  cat "$tmpdir/recv3.err" >&2 || true
   exit 1
 }
 
