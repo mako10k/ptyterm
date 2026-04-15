@@ -81,6 +81,12 @@ enum ptyterm_recv_format {
   PTYTERM_RECV_FORMAT_ESCAPED,
 };
 
+enum ptyterm_filter_mode {
+  PTYTERM_FILTER_MODE_NONE = 0,
+  PTYTERM_FILTER_MODE_ESCAPE,
+  PTYTERM_FILTER_MODE_UNESCAPE,
+};
+
 static int set_nonblocking(int fd) {
   int flags;
 
@@ -222,6 +228,10 @@ static void print_text_help(FILE *out, const char *program_name) {
   fprintf(out, "      --cols=N        : cols for --resize\n");
   fprintf(out, "  -s, --socket=PATH   : override daemon control socket path\n");
   fprintf(out, "\n");
+  fprintf(out, "Filter options:\n");
+  fprintf(out, "      --escape        : read stdin and write escaped bytes to stdout\n");
+  fprintf(out, "      --unescape      : read escaped stdin and write decoded bytes to stdout\n");
+  fprintf(out, "\n");
   fprintf(out, "Common options:\n");
   fprintf(out, "  -V, --version             : print version and exit\n");
   fprintf(out, "  -h, --help                : print this usage and exit\n");
@@ -339,6 +349,15 @@ static void print_yaml_help(FILE *out, const char *program_name) {
   fprintf(out, "      requires: [--recv]\n");
   fprintf(out, "      default: escaped on TTY stdout, raw otherwise\n");
   fprintf(out, "      description: Select exact-byte or terminal-safe recv payload rendering.\n");
+  fprintf(out, "  filter_operations:\n");
+  fprintf(out, "    - long: --escape\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      description: Read stdin and write canonical escaped byte notation to stdout.\n");
+  fprintf(out, "    - long: --unescape\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      description: Read escaped byte notation from stdin and write decoded bytes to stdout.\n");
   fprintf(out, "    - long: --peek\n");
   fprintf(out, "      short: null\n");
   fprintf(out, "      argument: none\n");
@@ -825,22 +844,30 @@ static int hex_value(int c) {
   return -1;
 }
 
-static size_t decode_send_data(const char *input, char *output, size_t output_size) {
+static int parse_byte_notation(const char *input, size_t input_size,
+                               char *output, size_t output_size,
+                               size_t *output_size_out,
+                               const char *context_name) {
   size_t in_offset;
   size_t out_offset;
 
   in_offset = 0;
   out_offset = 0;
-  while (input[in_offset] != '\0') {
+  while (in_offset < input_size) {
     int c;
 
     if (out_offset >= output_size) {
-      fprintf(stderr, "decoded send data too large\n");
-      exit(EXIT_FAILURE);
+      fprintf(stderr, "decoded data too large in %s\n", context_name);
+      return -1;
     }
 
     c = (unsigned char)input[in_offset++];
     if (c == '\\') {
+      if (in_offset >= input_size) {
+        fprintf(stderr, "trailing backslash in %s\n", context_name);
+        return -1;
+      }
+
       c = (unsigned char)input[in_offset++];
       switch (c) {
       case '\\': output[out_offset++] = '\\'; break;
@@ -856,7 +883,8 @@ static size_t decode_send_data(const char *input, char *output, size_t output_si
 
         value = c - '0';
         digits = 1;
-        while (digits < 3 && input[in_offset] >= '0' && input[in_offset] <= '7') {
+        while (digits < 3 && in_offset < input_size && input[in_offset] >= '0' &&
+               input[in_offset] <= '7') {
           value = (value * 8) + (input[in_offset++] - '0');
           digits += 1;
         }
@@ -867,21 +895,23 @@ static size_t decode_send_data(const char *input, char *output, size_t output_si
         int hi;
         int lo;
 
+        if (in_offset + 1 >= input_size) {
+          fprintf(stderr, "invalid hex escape in %s\n", context_name);
+          return -1;
+        }
+
         hi = hex_value((unsigned char)input[in_offset++]);
         lo = hex_value((unsigned char)input[in_offset++]);
         if (hi < 0 || lo < 0) {
-          fprintf(stderr, "invalid hex escape in --send\n");
-          exit(EXIT_FAILURE);
+          fprintf(stderr, "invalid hex escape in %s\n", context_name);
+          return -1;
         }
         output[out_offset++] = (char)((hi << 4) | lo);
         break;
       }
-      case '\0':
-        fprintf(stderr, "trailing backslash in --send\n");
-        exit(EXIT_FAILURE);
       default:
-        fprintf(stderr, "invalid escape in --send: \\%c\n", c);
-        exit(EXIT_FAILURE);
+        fprintf(stderr, "invalid escape in %s: \\%c\n", context_name, c);
+        return -1;
       }
       continue;
     }
@@ -889,11 +919,12 @@ static size_t decode_send_data(const char *input, char *output, size_t output_si
     if (c == '^') {
       int next;
 
-      next = (unsigned char)input[in_offset++];
-      if (next == '\0') {
-        fprintf(stderr, "trailing caret in --send\n");
-        exit(EXIT_FAILURE);
+      if (in_offset >= input_size) {
+        fprintf(stderr, "trailing caret in %s\n", context_name);
+        return -1;
       }
+
+      next = (unsigned char)input[in_offset++];
       if (next == '?') {
         output[out_offset++] = 0x7f;
         continue;
@@ -906,28 +937,59 @@ static size_t decode_send_data(const char *input, char *output, size_t output_si
         output[out_offset++] = (char)(next - 'a' + 1);
         continue;
       }
-      fprintf(stderr, "invalid caret escape in --send: ^%c\n", next);
-      exit(EXIT_FAILURE);
+      fprintf(stderr, "invalid caret escape in %s: ^%c\n", context_name,
+              next);
+      return -1;
     }
 
     output[out_offset++] = (char)c;
   }
 
-  return out_offset;
+  *output_size_out = out_offset;
+  return 0;
+}
+
+static size_t decode_send_data(const char *input, char *output, size_t output_size) {
+  size_t decoded_size;
+
+  if (parse_byte_notation(input, strlen(input), output, output_size,
+                          &decoded_size, "--send") == -1)
+    exit(EXIT_FAILURE);
+  return decoded_size;
+}
+
+static int write_all(int fd, const void *buffer, size_t size) {
+  const char *cursor;
+
+  cursor = (const char *)buffer;
+  while (size > 0) {
+    ssize_t written;
+
+    written = write(fd, cursor, size);
+    if (written == -1) {
+      if (errno == EINTR)
+        continue;
+      return -1;
+    }
+    cursor += written;
+    size -= (size_t)written;
+  }
+  return 0;
 }
 
 static int write_recv_payload_raw(const char *data, uint32_t size) {
   if (size == 0)
     return EXIT_SUCCESS;
-  if (fwrite(data, 1, size, stdout) != size) {
-    perror("fwrite");
+  if (write_all(STDOUT_FILENO, data, size) == -1) {
+    perror("write");
     return EXIT_FAILURE;
   }
   return EXIT_SUCCESS;
 }
 
-static int write_recv_payload_escaped(const char *data, uint32_t size) {
-  uint32_t offset;
+static int format_byte_notation(FILE *out, const char *data, size_t size,
+                                int append_newline) {
+  size_t offset;
 
   for (offset = 0; offset < size; ++offset) {
     unsigned char byte;
@@ -980,12 +1042,127 @@ static int write_recv_payload_escaped(const char *data, uint32_t size) {
     }
   }
 
-  if (size > 0 && fputc('\n', stdout) == EOF) {
+  if (append_newline && size > 0 && fputc('\n', out) == EOF) {
     perror("fputc");
     return EXIT_FAILURE;
   }
 
   return EXIT_SUCCESS;
+}
+
+static int write_recv_payload_escaped(const char *data, uint32_t size) {
+  return format_byte_notation(stdout, data, size, 1);
+}
+
+static int read_all_stdin(char **buffer_out, size_t *buffer_size_out) {
+  char *buffer;
+  size_t buffer_size;
+  size_t buffer_capacity;
+
+  buffer_capacity = 4096;
+  buffer_size = 0;
+  buffer = (char *)malloc(buffer_capacity + 1);
+  if (buffer == NULL) {
+    perror("malloc");
+    return EXIT_FAILURE;
+  }
+
+  for (;;) {
+    ssize_t chunk_size;
+
+    chunk_size = read(STDIN_FILENO, buffer + buffer_size,
+                      buffer_capacity - buffer_size);
+    if (chunk_size == -1) {
+      if (errno == EINTR)
+        continue;
+      perror("read");
+      free(buffer);
+      return EXIT_FAILURE;
+    }
+    if (chunk_size == 0)
+      break;
+
+    buffer_size += (size_t)chunk_size;
+    if (buffer_size == buffer_capacity) {
+      char *new_buffer;
+
+      if (buffer_capacity > (((size_t)-1) / 2) - 1) {
+        fprintf(stderr, "stdin too large for --unescape\n");
+        free(buffer);
+        return EXIT_FAILURE;
+      }
+      buffer_capacity *= 2;
+      new_buffer = (char *)realloc(buffer, buffer_capacity + 1);
+      if (new_buffer == NULL) {
+        perror("realloc");
+        free(buffer);
+        return EXIT_FAILURE;
+      }
+      buffer = new_buffer;
+    }
+  }
+
+  buffer[buffer_size] = '\0';
+  *buffer_out = buffer;
+  *buffer_size_out = buffer_size;
+  return EXIT_SUCCESS;
+}
+
+static int run_escape_filter(void) {
+  char buffer[4096];
+
+  for (;;) {
+    ssize_t chunk_size;
+
+    chunk_size = read(STDIN_FILENO, buffer, sizeof(buffer));
+    if (chunk_size == -1) {
+      if (errno == EINTR)
+        continue;
+      perror("read");
+      return EXIT_FAILURE;
+    }
+    if (chunk_size == 0)
+      break;
+    if (format_byte_notation(stdout, buffer, (size_t)chunk_size, 0) !=
+        EXIT_SUCCESS)
+      return EXIT_FAILURE;
+  }
+
+  if (fflush(stdout) == EOF) {
+    perror("fflush");
+    return EXIT_FAILURE;
+  }
+  return EXIT_SUCCESS;
+}
+
+static int run_unescape_filter(void) {
+  char *buffer;
+  char *decoded;
+  size_t buffer_size;
+  size_t decoded_size;
+  int result;
+
+  if (read_all_stdin(&buffer, &buffer_size) != EXIT_SUCCESS)
+    return EXIT_FAILURE;
+
+  decoded = (char *)malloc(buffer_size == 0 ? 1 : buffer_size);
+  if (decoded == NULL) {
+    perror("malloc");
+    free(buffer);
+    return EXIT_FAILURE;
+  }
+
+  result = parse_byte_notation(buffer, buffer_size, decoded,
+                               buffer_size == 0 ? 1 : buffer_size,
+                               &decoded_size, "--unescape");
+  if (result == 0 && write_all(STDOUT_FILENO, decoded, decoded_size) == -1) {
+    perror("write");
+    result = -1;
+  }
+
+  free(decoded);
+  free(buffer);
+  return result == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 static int run_send_client(const char *socket_path, int session_id,
@@ -1831,6 +2008,7 @@ int main(int argc, char *const argv[]) {
   int list_requested = 0;
   int recv_peek = 0;
   int recv_format = PTYTERM_RECV_FORMAT_AUTO;
+  int filter_mode = PTYTERM_FILTER_MODE_NONE;
   const char *recv_until = NULL;
   uint64_t recv_timeout_ms = 0;
   int resize_requested = 0;
@@ -1850,6 +2028,8 @@ int main(int argc, char *const argv[]) {
     int optindex;
     enum {
       OPT_SEND = 1000,
+      OPT_ESCAPE,
+      OPT_UNESCAPE,
       OPT_RECV,
       OPT_RECV_FORMAT,
       OPT_RECV_SIZE,
@@ -1875,6 +2055,8 @@ int main(int argc, char *const argv[]) {
                {"detach", no_argument, NULL, 'D'},
                        {"resize", no_argument, NULL, 'R'},
                        {"send", required_argument, NULL, OPT_SEND},
+                       {"escape", no_argument, NULL, OPT_ESCAPE},
+                       {"unescape", no_argument, NULL, OPT_UNESCAPE},
                        {"recv", no_argument, NULL, OPT_RECV},
                        {"recv-format", required_argument, NULL, OPT_RECV_FORMAT},
                        {"recv-size", required_argument, NULL, OPT_RECV_SIZE},
@@ -1940,6 +2122,12 @@ int main(int argc, char *const argv[]) {
       break;
     case OPT_SEND:
       send_data = optarg;
+      break;
+    case OPT_ESCAPE:
+      filter_mode = PTYTERM_FILTER_MODE_ESCAPE;
+      break;
+    case OPT_UNESCAPE:
+      filter_mode = PTYTERM_FILTER_MODE_UNESCAPE;
       break;
     case OPT_RECV:
       recv_requested = 1;
@@ -2025,6 +2213,13 @@ int main(int argc, char *const argv[]) {
     return usage_error(argv[0], "--recv-format requires --recv");
   if ((recv_timeout_ms != 0 || recv_until != NULL) && !recv_requested)
     return usage_error(argv[0], "recv wait options require --recv");
+  if (filter_mode != PTYTERM_FILTER_MODE_NONE && (ifile || ofile || afile))
+    return usage_error(argv[0],
+                       "filter operations do not support file redirection options");
+  if (filter_mode != PTYTERM_FILTER_MODE_NONE &&
+      (opt_cols > 0 || opt_lines > 0))
+    return usage_error(argv[0],
+                       "filter operations do not support terminal sizing options");
 
   if ((attach_requested != 0) + (create_requested != 0) +
       (daemon_status_requested != 0) + (daemon_stop_requested != 0) +
@@ -2034,6 +2229,32 @@ int main(int argc, char *const argv[]) {
           (send_data != NULL) >
       1) {
     return usage_error(argv[0], "select only one management operation");
+  }
+
+  if (((attach_requested != 0) + (create_requested != 0) +
+       (daemon_status_requested != 0) + (daemon_stop_requested != 0) +
+       (detach_requested != 0) + (list_requested != 0) +
+       (resize_requested != 0) + (buffer_info_requested != 0) +
+       (recv_requested != 0) + (send_data != NULL) +
+       (filter_mode != PTYTERM_FILTER_MODE_NONE)) > 1) {
+    return usage_error(argv[0],
+                       "select only one management or filter operation");
+  }
+
+  if (filter_mode != PTYTERM_FILTER_MODE_NONE) {
+    if (socket_path != NULL || session_id != PTYTERM_SESSION_ALL ||
+        status_format != PTYTERM_STATUS_FORMAT_KV) {
+      return usage_error(argv[0],
+                         "filter operations do not accept management options");
+    }
+    if (optind != argc) {
+      return usage_error(
+          argv[0],
+          "filter operations do not accept environment or command arguments");
+    }
+    if (filter_mode == PTYTERM_FILTER_MODE_ESCAPE)
+      return run_escape_filter();
+    return run_unescape_filter();
   }
 
   if (attach_requested || create_requested || daemon_status_requested ||

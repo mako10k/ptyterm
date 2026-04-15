@@ -264,6 +264,48 @@ Send does not need a matching `--send-format` option in the first version.
 - The escaped recv form should reuse that same byte notation so users can copy escaped output back into `--send` when needed.
 - If a later release needs bulk structured input such as `--send-file`, it can be designed independently from recv rendering.
 
+### Shared byte-notation helpers
+
+The implementation should treat escape and unescape as one shared byte-notation subsystem rather than as separate `send` and `recv` features.
+
+Recommended split:
+
+- a parser helper that converts textual byte notation into raw bytes
+- a formatter helper that converts raw bytes into canonical textual notation
+- thin operation-specific wrappers that decide where bytes come from, where output is written, and whether any UI-oriented suffix such as a trailing newline is added
+
+This split matches the current code shape well:
+
+- `--send=DATA` already owns the parser side
+- escaped `--recv` already owns the formatter side
+- the TTY-sensitive recv default and status-line behavior sit above the byte-notation layer and should remain there
+
+In the current implementation, escaped `recv` also appends its trailing newline inside the same local formatter path once escaped mode has been selected. The refactoring target should split that newline policy back out into a wrapper-level decision before the helpers are exposed as standalone filters.
+
+Recommended helper responsibilities:
+
+- `parse_byte_notation(...)` accepts the canonical escaped text form and writes decoded bytes into a caller-supplied buffer
+- `format_byte_notation(...)` accepts raw bytes and writes the canonical escaped text form to a caller-supplied sink or buffer
+- wrapper code for `--recv-format=escaped` decides whether to append the terminal-facing newline after a successful non-empty recv
+- wrapper code for standalone `--escape` and `--unescape` acts as a pure stdin-to-stdout filter and should not add extra framing by default
+
+The canonical notation should be defined once and reused everywhere that textual byte representation appears.
+
+Recommended contract boundaries:
+
+- the shared parser and formatter should not print status lines, usage text, or recv metadata
+- the shared parser and formatter should not decide TTY-sensitive defaults
+- the shared parser should report invalid sequences in a reusable way so `--send` and standalone `--unescape` can present consistent diagnostics
+- the shared formatter should not append a trailing newline on its own; newline insertion is a caller policy
+
+Compatibility notes:
+
+- `--send` should continue accepting the current escape vocabulary during the transition
+- escaped `--recv` should move to the canonical formatter, even if backward-compatibility requires temporary acceptance of more than one input spelling on the parser side
+- if caret notation such as `^C` is retained only for compatibility, that should be an explicit parser policy rather than part of the formatter output
+
+This gives the new standalone functionality a narrow implementation target: expose the shared parser and formatter through CLI filter modes without coupling them to daemon-specific recv/send control flow.
+
 ### Status output shape
 
 All daemon-backed status-producing operations should share the same output convention.

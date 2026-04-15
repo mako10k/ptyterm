@@ -99,6 +99,17 @@ alternate representation intended for automation, prompting, and tool-driven
 capability discovery. Argument and option errors point to both help entry
 points.
 
+Standalone byte notation filters:
+
+```sh
+printf 'hello\n' | ./src/ptyterm --escape
+printf '%s' 'hello\n' | ./src/ptyterm --unescape
+```
+
+`--escape` reads raw bytes from stdin and writes ptyterm's escaped byte
+notation to stdout. `--unescape` performs the inverse conversion and is useful
+for preparing raw byte streams for piping, scripting, or file output.
+
 Documentation status
 --------------------
 

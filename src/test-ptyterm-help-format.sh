@@ -48,3 +48,15 @@ printf '%s\n' "$out" | grep -q 'long: --recv-format' || {
   printf '%s\n' "$out" >&2
   exit 1
 }
+
+printf '%s\n' "$out" | grep -q 'long: --escape' || {
+  echo "ptyterm --help-format=yaml: expected escape option entry" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q 'long: --unescape' || {
+  echo "ptyterm --help-format=yaml: expected unescape option entry" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}

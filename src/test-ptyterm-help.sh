@@ -90,6 +90,18 @@ printf '%s\n' "$out" | grep -q -- "--send=DATA" || {
   exit 1
 }
 
+printf '%s\n' "$out" | grep -q -- "--escape" || {
+  echo "ptyterm -h: expected escape option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--unescape" || {
+  echo "ptyterm -h: expected unescape option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
 printf '%s\n' "$out" | grep -q -- "--recv" || {
   echo "ptyterm -h: expected recv option in output" >&2
   printf '%s\n' "$out" >&2
