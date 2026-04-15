@@ -42,3 +42,9 @@ printf '%s\n' "$out" | grep -q 'long: --create' || {
   printf '%s\n' "$out" >&2
   exit 1
 }
+
+printf '%s\n' "$out" | grep -q 'long: --recv-format' || {
+  echo "ptyterm --help-format=yaml: expected recv-format option entry" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}

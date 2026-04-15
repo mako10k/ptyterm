@@ -224,14 +224,54 @@ Rules:
 
 This mirrors the recv model: one verb option selects the operation, additional named options refine the behavior.
 
+### Recv output format shape
+
+Recv rendering should stay separate from `--status-format`.
+
+- `--status-format` remains the rendering control for status-oriented operations such as `list` and `buffer-info`, and for recv status lines when recv uses a text-oriented output format.
+- `--recv-format` defines how recv payload is rendered on standard output.
+- The default recv format should depend on whether standard output is a TTY: use `escaped` for terminal output and `raw` otherwise.
+
+Recommended recv forms:
+
+```sh
+ptyterm --recv --session=ID [--recv-size=BYTES] [--recv-timeout=DURATION] [--recv-lines=N] [--recv-format=escaped|raw|json]
+```
+
+Rules for recv output formats:
+
+- When `--recv-format` is omitted, select `escaped` if `isatty(STDOUT_FILENO)` is true and `raw` otherwise.
+- Escaped mode should reuse the same escape vocabulary already accepted by `--send=DATA` so control bytes such as `\n`, `\r`, `\t`, `\0`, and `\x1e` round-trip predictably.
+- Escaped mode should leave ordinary printable bytes readable, escape control bytes and backslashes, and append one terminating newline after each successful non-empty recv result so the next shell prompt starts on its own line.
+- `--recv-format=raw` preserves the exact-byte scripting contract by writing the received bytes unchanged to standard output.
+- `--recv-format=json` writes one structured envelope to standard output containing the payload plus the same logical recv metadata that is otherwise summarized on standard error.
+- The JSON envelope should carry payload bytes in a binary-safe way rather than assuming UTF-8 text.
+- This keeps interactive terminal use readable without making redirected or piped recv calls silently lose byte-exact behavior.
+
+Examples:
+
+```sh
+ptyterm --recv --session=7
+ptyterm --recv --session=7 --recv-format=raw >recv.bin
+ptyterm --recv --session=7 --recv-format=json
+```
+
+The structured recv envelope should include the session identity, whether the read was `peek`, the stop reason, the next offset, and the payload bytes.
+
+Send does not need a matching `--send-format` option in the first version.
+
+- `--send=DATA` already accepts escape decoding at the CLI boundary.
+- The escaped recv form should reuse that same byte notation so users can copy escaped output back into `--send` when needed.
+- If a later release needs bulk structured input such as `--send-file`, it can be designed independently from recv rendering.
+
 ### Status output shape
 
 All daemon-backed status-producing operations should share the same output convention.
 
 - Human-readable text by default.
 - Stable `key=value` lines when `--status-format=kv` is selected.
-- Raw payload bytes, when any exist, go to standard output.
-- Status metadata goes to standard error.
+- For `--recv-format=escaped|raw`, payload output goes to standard output and recv status metadata goes to standard error.
+- For `--recv-format=json`, the stdout contract is defined by the selected payload format and standard error should be reserved for fatal diagnostics.
 
 This should apply consistently to `send`, `recv`, `list`, and `buffer-info`.
 
@@ -293,7 +333,7 @@ Usage:
   ptyterm --detach --session=ID
   ptyterm --list [--session=ID]
   ptyterm --send=DATA --session=ID [--send-policy=block|truncate]
-  ptyterm --recv --session=ID [--recv-size=BYTES] [--recv-timeout=DURATION] [--recv-lines=N]
+  ptyterm --recv --session=ID [--recv-size=BYTES] [--recv-timeout=DURATION] [--recv-lines=N] [--recv-format=escaped|raw|json]
   ptyterm --buffer-info --session=ID
 
 Default mode:
@@ -328,6 +368,8 @@ Management operation options:
   --recv-size=BYTES          Maximum bytes to return from recv
   --recv-timeout=DURATION    Maximum recv wait time
   --recv-lines=N             Maximum lines to return from recv
+  --recv-format=escaped|raw|json
+                             Recv payload contract
 
 Compatibility aliases:
   -A --attach
@@ -345,8 +387,10 @@ Compatibility aliases:
 Notes:
   Exactly one management operation may be selected per invocation.
   Management operations cannot be combined with CMD execution.
-  recv writes payload bytes to stdout and status metadata to stderr.
-  Status format 'kv' prints one key=value pair per line.
+  recv defaults to escaped stdout rendering when stdout is a TTY, and raw bytes otherwise.
+  Escaped recv appends a terminating newline so the next shell prompt is distinct.
+  Structured recv output carries both payload and recv metadata on stdout.
+  Status format 'kv' prints one key=value pair per line for escaped or raw recv status output.
 ```
 
 #### Draft `ptytermd --help`
@@ -814,7 +858,7 @@ This mirrors the `send` side closely:
 
 #### recv status formatting
 
-Like `send`, `recv` should use text by default and stable key-value output when `--status-format=kv` is selected.
+For `--recv-format=escaped|raw`, `recv` should use text by default and stable key-value output when `--status-format=kv` is selected.
 
 Example text output:
 
@@ -834,7 +878,13 @@ truncated=0
 reason=size_reached
 ```
 
-This makes `recv` scriptable using the same parsing strategy as `send`.
+This makes escaped and raw `recv` scriptable using the same parsing strategy as `send`, while letting non-interactive stdout keep raw bytes by default.
+
+For `--recv-format=json`, the selected payload envelope becomes the complete stdout contract for successful responses.
+
+- Structured recv output should include both payload bytes and recv metadata together.
+- Standard error should be reserved for fatal diagnostics.
+- `--status-format` should be rejected together with structured recv formats to avoid two competing metadata channels.
 
 ## recv spec
 
@@ -860,15 +910,18 @@ Defaults:
 - `timeout=1s`
 - `lines=0` for unlimited lines
 
-`recv` returns both payload bytes and status metadata. In text mode, the payload is written to standard output and status text goes to standard error. In `kv` mode, payload handling needs a deterministic split.
+`recv` returns both payload bytes and status metadata. In escaped and raw modes, the payload is written to standard output and status text goes to standard error. In structured mode, both are serialized together on standard output.
 
 Recommended first-version rule:
 
-- `recv` payload always goes to standard output.
-- `--status-format=text` prints status to standard error.
-- `--status-format=kv` also prints status to standard error in `key=value` form.
+- If `--recv-format` is omitted, `recv` chooses `escaped` for TTY stdout and `raw` otherwise.
+- `--recv-format=escaped` writes escaped payload text to standard output and appends one terminating newline after each successful non-empty recv result.
+- `--recv-format=raw` writes payload bytes unchanged to standard output.
+- `--status-format=text` prints escaped or raw recv status to standard error.
+- `--status-format=kv` prints escaped or raw recv status to standard error in `key=value` form.
+- `--recv-format=json` writes a single structured response to standard output and rejects `--status-format`.
 
-This avoids mixing raw session bytes with parseable status lines on the same stream.
+This avoids mixing raw session bytes with parseable status lines on the same stream while still allowing a single-stream structured contract for automation.
 
 Parsing rules:
 
