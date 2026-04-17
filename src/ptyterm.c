@@ -640,8 +640,9 @@ static int print_list_response(const void *payload, size_t payload_size) {
 
   summary = (const struct ptyterm_session_summary *)(response + 1);
   for (i = 0; i < response->session_count; ++i) {
-    printf("%u\t%s\t%d\t%s\n", summary[i].id,
+    printf("%u\t%s\t%d\t%s\t%d\t%s\t%s\n", summary[i].id,
            ptyterm_session_state_name(summary[i].state), summary[i].child_pid,
+           summary[i].tty_name, summary[i].fg_pgid, summary[i].fg_task,
            summary[i].command);
   }
   return EXIT_SUCCESS;

@@ -9,6 +9,8 @@
 #define PTYTERM_COMMAND_MAX 128
 #define PTYTERM_ERROR_MESSAGE_MAX 128
 #define PTYTERM_REASON_MAX 32
+#define PTYTERM_TASK_NAME_MAX 32
+#define PTYTERM_TTY_NAME_MAX 64
 #define PTYTERM_SESSION_ALL (-1)
 
 enum ptyterm_message_type {
@@ -60,7 +62,10 @@ struct ptyterm_session_summary {
   uint32_t id;
   uint32_t state;
   int32_t child_pid;
+  int32_t fg_pgid;
   int32_t exit_status;
+  char fg_task[PTYTERM_TASK_NAME_MAX];
+  char tty_name[PTYTERM_TTY_NAME_MAX];
   char command[PTYTERM_COMMAND_MAX];
 };
 

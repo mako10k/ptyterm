@@ -6,6 +6,7 @@
 
 #include "ptyterm-control.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -44,6 +45,7 @@ struct ptyterm_session {
   size_t ring_start;
   size_t ring_len;
   char *output_ring;
+  char tty_name[PTYTERM_TTY_NAME_MAX];
   char command[PTYTERM_COMMAND_MAX];
 };
 
@@ -53,6 +55,13 @@ struct ptyterm_daemon_state {
   uint32_t output_buffer;
   struct ptyterm_session sessions[32];
   size_t session_count;
+};
+
+struct ptyterm_foreground_task_info {
+  int32_t pgid;
+  pid_t representative_pid;
+  unsigned long long representative_start_time;
+  char task_name[PTYTERM_TASK_NAME_MAX];
 };
 
 static volatile sig_atomic_t stop_requested = 0;
@@ -323,6 +332,165 @@ static int open_slave_fd(const char *slave_name) {
   return open(slave_name, O_RDWR);
 }
 
+static int32_t current_foreground_pgid(const struct ptyterm_session *session) {
+  pid_t fg_pgid;
+
+  if (session->master_fd < 0)
+    return -1;
+
+  fg_pgid = tcgetpgrp(session->master_fd);
+  if (fg_pgid == -1)
+    return -1;
+
+  return (int32_t)fg_pgid;
+}
+
+static int is_decimal_name(const char *value) {
+  const unsigned char *cursor;
+
+  if (value == NULL || *value == '\0')
+    return 0;
+
+  for (cursor = (const unsigned char *)value; *cursor != '\0'; ++cursor) {
+    if (*cursor < '0' || *cursor > '9')
+      return 0;
+  }
+
+  return 1;
+}
+
+static int read_proc_stat(pid_t pid, int32_t *pgrp_out,
+                          unsigned long long *start_time_out, char *state_out) {
+  char path[64];
+  char buffer[512];
+  char *tail;
+  FILE *stream;
+  int pgrp;
+  unsigned long long start_time;
+  char state;
+
+  snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
+  stream = fopen(path, "r");
+  if (stream == NULL)
+    return -1;
+
+  if (fgets(buffer, sizeof(buffer), stream) == NULL) {
+    fclose(stream);
+    return -1;
+  }
+  fclose(stream);
+
+  tail = strrchr(buffer, ')');
+  if (tail == NULL || tail[1] != ' ')
+    return -1;
+
+  if (sscanf(tail + 2,
+             "%c %*d %d %*d %*d %*u %*u %*u %*u %*u %*u %*u %*d %*d %*d %*d %*d %llu",
+             &state, &pgrp, &start_time) != 3) {
+    return -1;
+  }
+
+  *pgrp_out = (int32_t)pgrp;
+  *start_time_out = start_time;
+  *state_out = state;
+  return 0;
+}
+
+static int read_proc_comm(pid_t pid, char *buffer, size_t buffer_size) {
+  char path[64];
+  FILE *stream;
+
+  if (buffer_size == 0)
+    return -1;
+
+  snprintf(path, sizeof(path), "/proc/%ld/comm", (long)pid);
+  stream = fopen(path, "r");
+  if (stream == NULL)
+    return -1;
+
+  if (fgets(buffer, buffer_size, stream) == NULL) {
+    fclose(stream);
+    buffer[0] = '\0';
+    return -1;
+  }
+  fclose(stream);
+
+  buffer[strcspn(buffer, "\n")] = '\0';
+  return buffer[0] == '\0' ? -1 : 0;
+}
+
+static void resolve_foreground_task_info(const struct ptyterm_session *session,
+                                         struct ptyterm_foreground_task_info *info) {
+  DIR *proc_dir;
+  struct dirent *entry;
+  pid_t best_pid;
+  pid_t leader_pid;
+  unsigned long long best_start_time;
+  unsigned long long leader_start_time;
+
+  memset(info, 0, sizeof(*info));
+  info->pgid = current_foreground_pgid(session);
+  info->representative_pid = -1;
+  if (sizeof(info->task_name) == 0)
+    return;
+
+  info->task_name[0] = '\0';
+  if (info->pgid <= 0)
+    return;
+
+  proc_dir = opendir("/proc");
+  if (proc_dir == NULL)
+    return;
+
+  best_pid = -1;
+  leader_pid = -1;
+  best_start_time = 0;
+  leader_start_time = 0;
+  while ((entry = readdir(proc_dir)) != NULL) {
+    unsigned long long start_time;
+    int32_t pgrp;
+    pid_t pid;
+    char state;
+    char *end;
+
+    if (!is_decimal_name(entry->d_name))
+      continue;
+
+    errno = 0;
+    pid = (pid_t)strtol(entry->d_name, &end, 10);
+    if (errno != 0 || end == entry->d_name || *end != '\0')
+      continue;
+
+    if (read_proc_stat(pid, &pgrp, &start_time, &state) == -1 || pgrp != info->pgid)
+      continue;
+
+    if (pid == (pid_t)info->pgid) {
+      leader_pid = pid;
+      leader_start_time = start_time;
+    }
+
+    if (state == 'Z' || pid == (pid_t)info->pgid)
+      continue;
+
+    if (best_pid == -1 || start_time >= best_start_time) {
+      best_pid = pid;
+      best_start_time = start_time;
+    }
+  }
+  closedir(proc_dir);
+
+  if (best_pid == -1)
+    best_pid = leader_pid;
+  if (best_pid == -1)
+    return;
+
+  info->representative_pid = best_pid;
+  info->representative_start_time =
+      best_pid == leader_pid ? leader_start_time : best_start_time;
+  if (read_proc_comm(best_pid, info->task_name, sizeof(info->task_name)) == -1)
+    info->task_name[0] = '\0';
+}
+
 static void join_command(char *buffer, size_t buffer_size, uint32_t argc,
                          char *const argv[]) {
   size_t offset;
@@ -442,6 +610,7 @@ static int spawn_session(struct ptyterm_daemon_state *state, uint32_t argc,
     state->session_count -= 1;
     return -1;
   }
+  snprintf(session->tty_name, sizeof(session->tty_name), "%s", slave_name);
   join_command(session->command, sizeof(session->command), argc, argv);
 
   response->session_id = session->id;
@@ -595,6 +764,7 @@ static int send_list_response(int client_fd,
                               const struct ptyterm_daemon_state *state,
                               int requested_session_id) {
   struct ptyterm_list_response *response;
+  struct ptyterm_foreground_task_info foreground_task;
   struct ptyterm_session_summary *summary;
   size_t i;
   size_t match_count;
@@ -624,7 +794,13 @@ static int send_list_response(int client_fd,
     summary->id = state->sessions[i].id;
     summary->state = state->sessions[i].state;
     summary->child_pid = state->sessions[i].child_pid;
+    resolve_foreground_task_info(&state->sessions[i], &foreground_task);
+    summary->fg_pgid = foreground_task.pgid;
     summary->exit_status = state->sessions[i].exit_status;
+    snprintf(summary->fg_task, sizeof(summary->fg_task), "%s",
+         foreground_task.task_name);
+    snprintf(summary->tty_name, sizeof(summary->tty_name), "%s",
+             state->sessions[i].tty_name);
     snprintf(summary->command, sizeof(summary->command), "%s",
              state->sessions[i].command);
     ++summary;

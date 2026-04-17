@@ -55,6 +55,20 @@ printf '%s\n' "$list_out" | grep -q '^1	detached	' || {
   exit 1
 }
 
+printf '%s\n' "$list_out" | awk -F '\t' '
+  NF != 7 { exit 1 }
+  $1 != "1" || $2 != "detached" { exit 1 }
+  $3 !~ /^[1-9][0-9]*$/ { exit 1 }
+  $4 !~ /^\/dev\/pts\/[0-9]+$/ { exit 1 }
+  $5 !~ /^[1-9][0-9]*$/ { exit 1 }
+  $6 != "sleep" { exit 1 }
+  $7 !~ /\/bin\/sh -c printf hello; sleep 2/ { exit 1 }
+' || {
+  echo "ptyterm --list after create: expected pid, tty, fg_pgid, fg_task, and command fields" >&2
+  printf '%s\n' "$list_out" >&2
+  exit 1
+}
+
 buffer_out=$(./ptyterm --buffer-info --session=1 --socket="$sock" 2>&1) || {
   echo "ptyterm --buffer-info after create: expected success" >&2
   printf '%s\n' "$buffer_out" >&2
