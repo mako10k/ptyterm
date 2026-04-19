@@ -60,7 +60,9 @@ static int monotonic_time_ms(uint64_t *time_ms_out);
 static void print_help(FILE *out, const char *program_name, int help_format);
 static int usage_error(const char *program_name, const char *fmt, ...);
 static void print_create_status(const struct ptyterm_create_response *response,
-                int status_format);
+                                int status_format,
+                                const char *program_name,
+                                const char *socket_path);
 static void print_buffer_info_status(
   const struct ptyterm_buffer_info_response *response, int status_format);
 static void print_detach_status(const struct ptyterm_detach_response *response,
@@ -189,6 +191,16 @@ static void print_help_discovery(FILE *out, const char *program_name) {
   fprintf(out, "\n");
 }
 
+static void print_management_examples(FILE *out, const char *program_name) {
+  fprintf(out, "Examples:\n");
+  fprintf(out, "  %s --create -- /bin/sh -c 'echo hello; sleep 30'\n",
+          program_name);
+  fprintf(out, "  %s --session=1 --send='echo hello\\n'\n", program_name);
+  fprintf(out, "  %s --session=1 --recv\n", program_name);
+  fprintf(out, "  %s --help\n", program_name);
+  fprintf(out, "\n");
+}
+
 static void print_text_help(FILE *out, const char *program_name) {
   fprintf(out, "%s\n", PACKAGE_STRING);
   fprintf(out, "\n");
@@ -237,6 +249,7 @@ static void print_text_help(FILE *out, const char *program_name) {
   fprintf(out, "  -h, --help                : print this usage and exit\n");
   fprintf(out, "      --help-format=text|yaml : print help in the selected format\n");
   fprintf(out, "\n");
+  print_management_examples(out, program_name);
   print_help_discovery(out, program_name);
 }
 
@@ -391,6 +404,11 @@ static void print_yaml_help(FILE *out, const char *program_name) {
   fprintf(out, "  - description: Create a managed session\n");
   fprintf(out, "    command: \"%s --create -- /bin/sh -c 'echo hello; sleep 30'\"\n",
           program_name);
+    fprintf(out, "  - description: Send input to one managed session\n");
+    fprintf(out, "    command: \"%s --session=1 --send='echo hello\\n'\"\n",
+      program_name);
+    fprintf(out, "  - description: Receive buffered output from one managed session\n");
+    fprintf(out, "    command: \"%s --session=1 --recv\"\n", program_name);
   fprintf(out, "notes:\n");
   fprintf(out, "  - Exactly one management operation may be selected per invocation.\n");
   fprintf(out, "  - Management operations cannot be combined with standalone run output redirection except attach.\n");
@@ -419,18 +437,35 @@ static int usage_error(const char *program_name, const char *fmt, ...) {
   return EXIT_FAILURE;
 }
 
+static void print_create_next_steps(const char *program_name, uint32_t session_id,
+                                    const char *socket_path) {
+  fprintf(stderr, "Next actions:\n");
+  if (socket_path != NULL)
+    fprintf(stderr,
+            "  Reuse --socket=%s with the commands below.\n",
+            socket_path);
+  fprintf(stderr, "  %s --session=%u --send='echo hello\\n'\n", program_name,
+          session_id);
+  fprintf(stderr, "  %s --session=%u --recv\n", program_name, session_id);
+  fprintf(stderr, "  %s --help\n", program_name);
+}
+
 static void print_create_status(const struct ptyterm_create_response *response,
-                                int status_format) {
+                                int status_format,
+                                const char *program_name,
+                                const char *socket_path) {
   if (status_format == PTYTERM_STATUS_FORMAT_TEXT) {
     printf("session id: %u\n", response->session_id);
     printf("state: %s\n", ptyterm_session_state_name(response->state));
     printf("child pid: %d\n", response->child_pid);
+    print_create_next_steps(program_name, response->session_id, socket_path);
     return;
   }
 
   printf("session_id=%u\n", response->session_id);
   printf("state=%s\n", ptyterm_session_state_name(response->state));
   printf("child_pid=%d\n", response->child_pid);
+  print_create_next_steps(program_name, response->session_id, socket_path);
 }
 
 static void print_buffer_info_status(
@@ -765,6 +800,7 @@ static int run_create_client(const char *socket_path, int cmd_argc,
   char payload[4096];
   struct ptyterm_create_request *request;
   struct ptyterm_message_header header;
+  const char *resolved_socket_path;
   ssize_t payload_size;
   size_t offset;
   int fd;
@@ -785,9 +821,15 @@ static int run_create_client(const char *socket_path, int cmd_argc,
     offset += arg_size;
   }
 
-  fd = connect_daemon_socket(socket_path, default_socket_path, 1);
+  if (resolve_socket_path(socket_path, default_socket_path,
+                          &resolved_socket_path) == -1) {
+    perror("socket path");
+    return EXIT_FAILURE;
+  }
+
+  fd = connect_daemon_socket(resolved_socket_path, default_socket_path, 1);
   if (fd == -1) {
-    perror(socket_path);
+    perror(resolved_socket_path);
     return EXIT_FAILURE;
   }
 
@@ -815,7 +857,8 @@ static int run_create_client(const char *socket_path, int cmd_argc,
       return EXIT_FAILURE;
     }
     response = (const struct ptyterm_create_response *)payload;
-    print_create_status(response, status_format);
+    print_create_status(response, status_format, g_program_path,
+                        socket_path);
     return EXIT_SUCCESS;
   }
   case PTYTERM_MESSAGE_ERROR: {

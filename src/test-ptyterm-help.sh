@@ -126,6 +126,24 @@ printf '%s\n' "$out" | grep -q -- "--recv-until=STRING" || {
   exit 1
 }
 
+printf '%s\n' "$out" | grep -q -- "Examples:" || {
+  echo "ptyterm -h: expected examples section" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--session=1 --send='echo hello\\\\n'" || {
+  echo "ptyterm -h: expected send example in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--session=1 --recv" || {
+  echo "ptyterm -h: expected recv example in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
 printf '%s\n' "$out" | grep -q -- "--peek" || {
   echo "ptyterm -h: expected peek option in output" >&2
   printf '%s\n' "$out" >&2

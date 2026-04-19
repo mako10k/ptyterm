@@ -41,6 +41,36 @@ printf '%s\n' "$create_out" | grep -q '^session_id=1$' || {
   exit 1
 }
 
+printf '%s\n' "$create_out" | grep -q "^Next actions:$" || {
+  echo "ptyterm --create: expected next actions guidance" >&2
+  printf '%s\n' "$create_out" >&2
+  exit 1
+}
+
+printf '%s\n' "$create_out" | grep -q "Reuse --socket=$sock with the commands below\." || {
+  echo "ptyterm --create: expected socket reuse guidance" >&2
+  printf '%s\n' "$create_out" >&2
+  exit 1
+}
+
+printf '%s\n' "$create_out" | grep -q "^  \./ptyterm --session=1 --send='echo hello\\\\n'$" || {
+  echo "ptyterm --create: expected send guidance" >&2
+  printf '%s\n' "$create_out" >&2
+  exit 1
+}
+
+printf '%s\n' "$create_out" | grep -q '^  \./ptyterm --session=1 --recv$' || {
+  echo "ptyterm --create: expected recv guidance" >&2
+  printf '%s\n' "$create_out" >&2
+  exit 1
+}
+
+printf '%s\n' "$create_out" | grep -q '^  \./ptyterm --help$' || {
+  echo "ptyterm --create: expected help guidance" >&2
+  printf '%s\n' "$create_out" >&2
+  exit 1
+}
+
 sleep 1
 
 list_out=$(./ptyterm --list --socket="$sock" 2>&1) || {
