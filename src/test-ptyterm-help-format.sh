@@ -60,3 +60,15 @@ printf '%s\n' "$out" | grep -q 'long: --unescape' || {
   printf '%s\n' "$out" >&2
   exit 1
 }
+
+printf '%s\n' "$out" | grep -q 'description: Send input to one managed session' || {
+  echo "ptyterm --help-format=yaml: expected send example description" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q "command: \".*--session=1 --recv\"" || {
+  echo "ptyterm --help-format=yaml: expected recv example command" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}

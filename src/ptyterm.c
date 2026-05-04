@@ -60,7 +60,9 @@ static int monotonic_time_ms(uint64_t *time_ms_out);
 static void print_help(FILE *out, const char *program_name, int help_format);
 static int usage_error(const char *program_name, const char *fmt, ...);
 static void print_create_status(const struct ptyterm_create_response *response,
-                int status_format);
+                                int status_format,
+                                const char *program_name,
+                                const char *socket_path);
 static void print_buffer_info_status(
   const struct ptyterm_buffer_info_response *response, int status_format);
 static void print_detach_status(const struct ptyterm_detach_response *response,
@@ -79,6 +81,11 @@ enum ptyterm_recv_format {
   PTYTERM_RECV_FORMAT_AUTO = 0,
   PTYTERM_RECV_FORMAT_RAW,
   PTYTERM_RECV_FORMAT_ESCAPED,
+};
+
+enum ptyterm_recv_control_mode {
+  PTYTERM_RECV_CONTROL_WITHOUT = 0,
+  PTYTERM_RECV_CONTROL_WITH,
 };
 
 enum ptyterm_filter_mode {
@@ -119,6 +126,14 @@ static int parse_recv_format(const char *value) {
     return PTYTERM_RECV_FORMAT_RAW;
   if (strcmp(value, "escaped") == 0)
     return PTYTERM_RECV_FORMAT_ESCAPED;
+  return -1;
+}
+
+static int parse_recv_control_mode(const char *value) {
+  if (strcmp(value, "without") == 0)
+    return PTYTERM_RECV_CONTROL_WITHOUT;
+  if (strcmp(value, "with") == 0)
+    return PTYTERM_RECV_CONTROL_WITH;
   return -1;
 }
 
@@ -189,6 +204,16 @@ static void print_help_discovery(FILE *out, const char *program_name) {
   fprintf(out, "\n");
 }
 
+static void print_management_examples(FILE *out, const char *program_name) {
+  fprintf(out, "Examples:\n");
+  fprintf(out, "  %s --create -- /bin/sh -c 'echo hello; sleep 30'\n",
+          program_name);
+  fprintf(out, "  %s --session=1 --send='echo hello\\n'\n", program_name);
+  fprintf(out, "  %s --session=1 --recv\n", program_name);
+  fprintf(out, "  %s --help\n", program_name);
+  fprintf(out, "\n");
+}
+
 static void print_text_help(FILE *out, const char *program_name) {
   fprintf(out, "%s\n", PACKAGE_STRING);
   fprintf(out, "\n");
@@ -219,6 +244,7 @@ static void print_text_help(FILE *out, const char *program_name) {
   fprintf(out, "      --send=DATA     : send decoded bytes to one session\n");
   fprintf(out, "      --recv          : receive buffered output from one session\n");
   fprintf(out, "      --recv-format=raw|escaped : select recv payload rendering (default: escaped on TTY stdout, raw otherwise)\n");
+  fprintf(out, "      --recv-control=without|with : drop control characters from recv payload unless explicitly kept\n");
   fprintf(out, "      --recv-size=N   : maximum bytes returned by --recv\n");
   fprintf(out, "      --recv-timeout=DURATION : wait up to DURATION (ms|s) for recv\n");
   fprintf(out, "      --recv-until=STRING : wait until unread output contains STRING\n");
@@ -237,6 +263,7 @@ static void print_text_help(FILE *out, const char *program_name) {
   fprintf(out, "  -h, --help                : print this usage and exit\n");
   fprintf(out, "      --help-format=text|yaml : print help in the selected format\n");
   fprintf(out, "\n");
+  print_management_examples(out, program_name);
   print_help_discovery(out, program_name);
 }
 
@@ -349,6 +376,12 @@ static void print_yaml_help(FILE *out, const char *program_name) {
   fprintf(out, "      requires: [--recv]\n");
   fprintf(out, "      default: escaped on TTY stdout, raw otherwise\n");
   fprintf(out, "      description: Select exact-byte or terminal-safe recv payload rendering.\n");
+  fprintf(out, "    - long: --recv-control\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: without|with\n");
+  fprintf(out, "      default: without\n");
+  fprintf(out, "      requires: [--recv]\n");
+  fprintf(out, "      description: Drop control characters from recv payload unless explicitly kept.\n");
   fprintf(out, "  filter_operations:\n");
   fprintf(out, "    - long: --escape\n");
   fprintf(out, "      short: null\n");
@@ -391,6 +424,11 @@ static void print_yaml_help(FILE *out, const char *program_name) {
   fprintf(out, "  - description: Create a managed session\n");
   fprintf(out, "    command: \"%s --create -- /bin/sh -c 'echo hello; sleep 30'\"\n",
           program_name);
+    fprintf(out, "  - description: Send input to one managed session\n");
+    fprintf(out, "    command: \"%s --session=1 --send='echo hello\\n'\"\n",
+      program_name);
+    fprintf(out, "  - description: Receive buffered output from one managed session\n");
+    fprintf(out, "    command: \"%s --session=1 --recv\"\n", program_name);
   fprintf(out, "notes:\n");
   fprintf(out, "  - Exactly one management operation may be selected per invocation.\n");
   fprintf(out, "  - Management operations cannot be combined with standalone run output redirection except attach.\n");
@@ -419,18 +457,35 @@ static int usage_error(const char *program_name, const char *fmt, ...) {
   return EXIT_FAILURE;
 }
 
+static void print_create_next_steps(const char *program_name, uint32_t session_id,
+                                    const char *socket_path) {
+  fprintf(stderr, "Next actions:\n");
+  if (socket_path != NULL)
+    fprintf(stderr,
+            "  Reuse --socket=%s with the commands below.\n",
+            socket_path);
+  fprintf(stderr, "  %s --session=%u --send='echo hello\\n'\n", program_name,
+          session_id);
+  fprintf(stderr, "  %s --session=%u --recv\n", program_name, session_id);
+  fprintf(stderr, "  %s --help\n", program_name);
+}
+
 static void print_create_status(const struct ptyterm_create_response *response,
-                                int status_format) {
+                                int status_format,
+                                const char *program_name,
+                                const char *socket_path) {
   if (status_format == PTYTERM_STATUS_FORMAT_TEXT) {
     printf("session id: %u\n", response->session_id);
     printf("state: %s\n", ptyterm_session_state_name(response->state));
     printf("child pid: %d\n", response->child_pid);
+    print_create_next_steps(program_name, response->session_id, socket_path);
     return;
   }
 
   printf("session_id=%u\n", response->session_id);
   printf("state=%s\n", ptyterm_session_state_name(response->state));
   printf("child_pid=%d\n", response->child_pid);
+  print_create_next_steps(program_name, response->session_id, socket_path);
 }
 
 static void print_buffer_info_status(
@@ -765,6 +820,7 @@ static int run_create_client(const char *socket_path, int cmd_argc,
   char payload[4096];
   struct ptyterm_create_request *request;
   struct ptyterm_message_header header;
+  const char *resolved_socket_path;
   ssize_t payload_size;
   size_t offset;
   int fd;
@@ -785,9 +841,15 @@ static int run_create_client(const char *socket_path, int cmd_argc,
     offset += arg_size;
   }
 
-  fd = connect_daemon_socket(socket_path, default_socket_path, 1);
+  if (resolve_socket_path(socket_path, default_socket_path,
+                          &resolved_socket_path) == -1) {
+    perror("socket path");
+    return EXIT_FAILURE;
+  }
+
+  fd = connect_daemon_socket(resolved_socket_path, default_socket_path, 1);
   if (fd == -1) {
-    perror(socket_path);
+    perror(resolved_socket_path);
     return EXIT_FAILURE;
   }
 
@@ -815,7 +877,8 @@ static int run_create_client(const char *socket_path, int cmd_argc,
       return EXIT_FAILURE;
     }
     response = (const struct ptyterm_create_response *)payload;
-    print_create_status(response, status_format);
+    print_create_status(response, status_format, g_program_path,
+                        socket_path);
     return EXIT_SUCCESS;
   }
   case PTYTERM_MESSAGE_ERROR: {
@@ -986,6 +1049,26 @@ static int write_recv_payload_raw(const char *data, uint32_t size) {
     return EXIT_FAILURE;
   }
   return EXIT_SUCCESS;
+}
+
+static int is_recv_visible_byte(unsigned char byte) {
+  return byte >= 0x20 && byte <= 0x7e;
+}
+
+static size_t filter_recv_control_chars(const char *data, uint32_t size,
+                                        char *output) {
+  size_t in_offset;
+  size_t out_offset;
+
+  out_offset = 0;
+  for (in_offset = 0; in_offset < size; ++in_offset) {
+    unsigned char byte;
+
+    byte = (unsigned char)data[in_offset];
+    if (is_recv_visible_byte(byte))
+      output[out_offset++] = data[in_offset];
+  }
+  return out_offset;
 }
 
 static int format_byte_notation(FILE *out, const char *data, size_t size,
@@ -1291,17 +1374,43 @@ static int request_recv_client(const char *socket_path, int session_id,
 
 static int print_recv_payload_and_status(
   const struct ptyterm_recv_response *response, const char *reason_override,
-  int recv_format) {
+  int recv_format, int recv_control_mode) {
   const char *data;
+  const char *output;
+  char *filtered;
+  uint32_t output_size;
 
   data = (const char *)(response + 1);
-  if (recv_format == PTYTERM_RECV_FORMAT_ESCAPED) {
-    if (write_recv_payload_escaped(data, response->returned_bytes) != EXIT_SUCCESS)
+  output = data;
+  output_size = response->returned_bytes;
+  filtered = NULL;
+
+  if (recv_control_mode == PTYTERM_RECV_CONTROL_WITHOUT &&
+      response->returned_bytes > 0) {
+    filtered = (char *)malloc(response->returned_bytes);
+    if (filtered == NULL) {
+      perror("malloc");
       return EXIT_FAILURE;
-  } else {
-    if (write_recv_payload_raw(data, response->returned_bytes) != EXIT_SUCCESS)
-      return EXIT_FAILURE;
+    }
+    output_size = (uint32_t)filter_recv_control_chars(data,
+                                                      response->returned_bytes,
+                                                      filtered);
+    output = filtered;
   }
+
+  if (recv_format == PTYTERM_RECV_FORMAT_ESCAPED) {
+    if (write_recv_payload_escaped(output, output_size) != EXIT_SUCCESS) {
+      free(filtered);
+      return EXIT_FAILURE;
+    }
+  } else {
+    if (write_recv_payload_raw(output, output_size) != EXIT_SUCCESS) {
+      free(filtered);
+      return EXIT_FAILURE;
+    }
+  }
+
+  free(filtered);
 
   print_recv_status_line(response->returned_bytes, response->start_offset,
                          response->end_offset, response->next_recv_offset,
@@ -1314,7 +1423,8 @@ static int print_recv_payload_and_status(
 static int run_recv_client(const char *socket_path, int session_id,
                            uint32_t recv_size, int recv_peek,
                            uint64_t recv_timeout_ms,
-                           const char *recv_until, int recv_format) {
+                           const char *recv_until, int recv_format,
+                           int recv_control_mode) {
   char payload[8192];
   const struct ptyterm_recv_response *response;
   uint64_t deadline_ms = 0;
@@ -1327,7 +1437,8 @@ static int run_recv_client(const char *socket_path, int session_id,
   if (recv_until == NULL && recv_timeout_ms == 0)
     return request_recv_client(socket_path, session_id, recv_size, recv_peek,
                                payload, sizeof(payload), &response) == EXIT_SUCCESS
-               ? print_recv_payload_and_status(response, NULL, recv_format)
+               ? print_recv_payload_and_status(response, NULL, recv_format,
+                                               recv_control_mode)
                : EXIT_FAILURE;
 
   until_size = recv_until == NULL ? 0 : strlen(recv_until);
@@ -1366,7 +1477,8 @@ static int run_recv_client(const char *socket_path, int session_id,
           EXIT_SUCCESS)
         return EXIT_FAILURE;
       return print_recv_payload_and_status(
-          response, recv_until == NULL ? NULL : "match_reached", recv_format);
+          response, recv_until == NULL ? NULL : "match_reached", recv_format,
+          recv_control_mode);
     }
 
     if (recv_until != NULL && response->returned_bytes == recv_size) {
@@ -2009,6 +2121,7 @@ int main(int argc, char *const argv[]) {
   int list_requested = 0;
   int recv_peek = 0;
   int recv_format = PTYTERM_RECV_FORMAT_AUTO;
+  int recv_control_mode = PTYTERM_RECV_CONTROL_WITHOUT;
   int filter_mode = PTYTERM_FILTER_MODE_NONE;
   const char *recv_until = NULL;
   uint64_t recv_timeout_ms = 0;
@@ -2033,6 +2146,7 @@ int main(int argc, char *const argv[]) {
       OPT_UNESCAPE,
       OPT_RECV,
       OPT_RECV_FORMAT,
+      OPT_RECV_CONTROL,
       OPT_RECV_SIZE,
       OPT_RECV_TIMEOUT,
       OPT_RECV_UNTIL,
@@ -2060,6 +2174,7 @@ int main(int argc, char *const argv[]) {
                        {"unescape", no_argument, NULL, OPT_UNESCAPE},
                        {"recv", no_argument, NULL, OPT_RECV},
                        {"recv-format", required_argument, NULL, OPT_RECV_FORMAT},
+                       {"recv-control", required_argument, NULL, OPT_RECV_CONTROL},
                        {"recv-size", required_argument, NULL, OPT_RECV_SIZE},
                        {"recv-timeout", required_argument, NULL, OPT_RECV_TIMEOUT},
                        {"recv-until", required_argument, NULL, OPT_RECV_UNTIL},
@@ -2138,6 +2253,11 @@ int main(int argc, char *const argv[]) {
       if (recv_format < 0)
         return usage_error(argv[0], "unsupported recv-format: %s", optarg);
       break;
+    case OPT_RECV_CONTROL:
+      recv_control_mode = parse_recv_control_mode(optarg);
+      if (recv_control_mode < 0)
+        return usage_error(argv[0], "unsupported recv-control: %s", optarg);
+      break;
     case OPT_PEEK:
       recv_peek = 1;
       break;
@@ -2212,6 +2332,8 @@ int main(int argc, char *const argv[]) {
     return usage_error(argv[0], "--peek requires --recv");
   if (recv_format != PTYTERM_RECV_FORMAT_AUTO && !recv_requested)
     return usage_error(argv[0], "--recv-format requires --recv");
+  if (recv_control_mode != PTYTERM_RECV_CONTROL_WITHOUT && !recv_requested)
+    return usage_error(argv[0], "--recv-control requires --recv");
   if ((recv_timeout_ms != 0 || recv_until != NULL) && !recv_requested)
     return usage_error(argv[0], "recv wait options require --recv");
   if (filter_mode != PTYTERM_FILTER_MODE_NONE && (ifile || ofile || afile))
@@ -2308,7 +2430,8 @@ int main(int argc, char *const argv[]) {
       return run_send_client(socket_path, session_id, send_data);
     if (recv_requested)
       return run_recv_client(socket_path, session_id, recv_size, recv_peek,
-                             recv_timeout_ms, recv_until, recv_format);
+                             recv_timeout_ms, recv_until, recv_format,
+                             recv_control_mode);
     return run_buffer_info_client(socket_path, session_id, status_format);
   }
 
