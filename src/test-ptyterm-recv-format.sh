@@ -58,10 +58,10 @@ script -q -c "exec ./ptyterm --recv --recv-size=4 --session=1 --socket='$sock' 2
 }
 
 tr -d '\r' <"$tmpdir/tty.out" >"$tmpdir/tty.norm"
-printf '%s\n' 'A\n\\\e' >"$tmpdir/expected.out"
+printf '%s\n' 'A\\' >"$tmpdir/expected.out"
 
 cmp "$tmpdir/expected.out" "$tmpdir/tty.norm" || {
-  echo "ptyterm --recv on tty: expected escaped payload plus newline" >&2
+  echo "ptyterm --recv on tty: expected escaped payload with control chars removed" >&2
   od -An -tx1 "$tmpdir/tty.norm" >&2 || true
   od -An -tx1 "$tmpdir/expected.out" >&2 || true
   cat "$tmpdir/recv.err" >&2 || true
@@ -73,5 +73,31 @@ grep -q 'recv 4 bytes' "$tmpdir/recv.err" || {
   echo "ptyterm --recv on tty: expected recv status output on stderr" >&2
   cat "$tmpdir/recv.err" >&2 || true
   cat "$tmpdir/tty.err" >&2 || true
+  exit 1
+}
+
+./ptyterm --send='A\n\\\e' --session=1 --socket="$sock" >/dev/null 2>"$tmpdir/send-with.err" || {
+  echo "ptyterm --send for recv-control: expected success" >&2
+  cat "$tmpdir/send-with.err" >&2 || true
+  exit 1
+}
+
+script -q -c "exec ./ptyterm --recv --recv-control=with --recv-size=4 --session=1 --socket='$sock' 2>'$tmpdir/recv-with.err'" /dev/null >"$tmpdir/tty-with.out" 2>"$tmpdir/tty-with.err" || {
+  echo "ptyterm --recv --recv-control=with on tty: expected success" >&2
+  cat "$tmpdir/tty-with.out" >&2 || true
+  cat "$tmpdir/recv-with.err" >&2 || true
+  cat "$tmpdir/tty-with.err" >&2 || true
+  exit 1
+}
+
+tr -d '\r' <"$tmpdir/tty-with.out" >"$tmpdir/tty-with.norm"
+printf '%s\n' 'A\n\\\e' >"$tmpdir/expected-with.out"
+
+cmp "$tmpdir/expected-with.out" "$tmpdir/tty-with.norm" || {
+  echo "ptyterm --recv --recv-control=with on tty: expected escaped payload including control chars" >&2
+  od -An -tx1 "$tmpdir/tty-with.norm" >&2 || true
+  od -An -tx1 "$tmpdir/expected-with.out" >&2 || true
+  cat "$tmpdir/recv-with.err" >&2 || true
+  cat "$tmpdir/tty-with.err" >&2 || true
   exit 1
 }

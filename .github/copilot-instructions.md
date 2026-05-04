@@ -1,5 +1,25 @@
 # Project Guidelines
 
+## Evidence-first outputs
+
+- Every response should cite concrete evidence when the task depends on repository facts: specific files inspected, commands run, tests executed, or logs observed.
+- If evidence is missing, state what file or command should be checked next instead of guessing.
+
+## Copilot Memory
+
+- For Copilot working memory, use the standard memory system under /memories/, /memories/session/, and /memories/repo/ rather than ad-hoc repository notes.
+- Store durable repository conventions and verified workflow facts in repo memory when they will help future development work.
+- Use session memory for temporary plans and in-progress investigation context that should not become repository documentation.
+
+## Specialized Agents
+
+- A custom agent named Code Librarian lives under .github/agents/code-librarian.agent.md.
+- Use Code Librarian when reviewing implementation conventions, checking rule compliance, or tightening repository guidance to match the current code.
+- A custom agent named Environment Operations lives under .github/agents/environment-operations.agent.md.
+- Use Environment Operations when handling runtime incidents, packaging or release problems, or environment-level failures that require evidence-first containment and root-cause correction.
+- A custom agent named Issue Delivery lives under .github/agents/issue-delivery.agent.md.
+- Use Issue Delivery when the user wants a GitHub issue carried through branch hygiene, history inspection, implementation, validation, and PR-ready completion evidence.
+
 ## PMO Agent Discipline
 
 - A custom agent named `PMO` lives under `.github/agents/pmo.agent.md`.
