@@ -618,6 +618,152 @@ This ordering is intentional.
 - Milestone 4 serves the human inspection use case once the underlying contract is settled.
 - Milestone 5 is explicitly optional and should be justified by real usage, not by design completeness.
 
+### Milestone 1 decision: canonical screen-state model
+
+The following decisions fix the Milestone 1 baseline.
+
+#### 1. Canonical object: snapshot, not stream replay
+
+The canonical object is a rendered terminal snapshot.
+
+- It represents terminal state at one observation point.
+- It is not a replay log.
+- It is not defined in terms of `recv` offsets.
+
+This means every later feature such as wait, diff, or human rendering must be explainable as operating on snapshots or transitions between snapshots.
+
+#### 2. v1 scope: viewport snapshot only
+
+Version 1 should model the visible viewport only.
+
+- The viewport is the currently addressable rows and columns of the selected screen.
+- Scrollback is explicitly out of scope for v1.
+- Historical replay remains the job of `recv` and the output stream buffer.
+
+This keeps the first state model aligned with all three motivating use cases, which primarily ask “what is visible now?” rather than “what was visible 500 lines ago?”.
+
+#### 3. Screen selection model
+
+The state model must distinguish three screen identities.
+
+- `active`: the screen currently presented to an attached terminal
+- `main`: the normal screen buffer
+- `alt`: the alternate screen buffer
+
+For v1:
+
+- The canonical snapshot always has a selected screen identity.
+- The transport model should be able to address `active`, `main`, and `alt` distinctly.
+- The initial human-facing UI may default to `active`, but the data model must not collapse `active` into either `main` or `alt`.
+
+If the alternate screen is inactive, the model may still retain its last known contents. Whether the first UI exposes that state directly is a later question, but the transport design must allow it.
+
+#### 4. Snapshot versioning
+
+Each snapshot must carry a monotonic generation value.
+
+- The generation is scoped to terminal-state snapshots, not to `recv` bytes.
+- It advances whenever the modeled screen state changes.
+- Future wait and delta operations will refer to this generation rather than to byte offsets.
+
+The design does not yet require how generations are encoded on the wire, only that they exist conceptually and are monotonic within a session.
+
+#### 5. Minimum session-state metadata carried with snapshots
+
+The snapshot model must include enough non-cell state to satisfy the use cases.
+
+Required metadata for v1:
+
+- selected screen identity
+- rows and columns of the selected viewport
+- cursor row and column
+- cursor visibility
+- foreground process group identity when available
+- foreground task name or representative command when available
+- whether control appears to have returned to the session shell
+- session state such as attached, detached, or exited
+- snapshot generation
+
+This is the minimum needed so that humans can inspect status and agents can wait on state transitions without inferring everything from raw bytes.
+
+#### 6. Cell model
+
+The viewport is modeled as a rectangular grid of cells.
+
+Each cell conceptually contains:
+
+- text content for that display position
+- display width semantics needed for wide characters
+- attribute state
+
+The first human-readable UI may render cells as plain text, but the underlying model must not assume one byte equals one cell or that attributes are absent.
+
+#### 7. Attribute model
+
+Attributes are part of the canonical state model even though the first user-facing UI may not display them richly.
+
+The baseline attribute set for the model should include:
+
+- foreground color
+- background color
+- bold
+- faint
+- italic
+- underline
+- blink
+- inverse
+- conceal
+- strikeout
+
+Additional metadata such as hyperlinks or more specialized OSC-derived state may be deferred, but the core model should assume that cells can carry structured attributes.
+
+#### 8. Deferred areas for v1
+
+The following remain intentionally out of scope for the canonical v1 model.
+
+- scrollback history
+- delta encoding
+- event streams
+- prompt-specific semantics
+- attribute-aware human presentation policy
+- full terminal mode fidelity beyond what is needed for screen selection and cursor visibility
+
+Those areas may be layered later, but they should not be required to define the v1 snapshot object.
+
+#### 9. Conceptual schema
+
+At the conceptual level, the canonical object is:
+
+```text
+terminal_snapshot {
+  session_id
+  generation
+  session_state
+  selected_screen: active|main|alt
+  viewport {
+    rows
+    cols
+    cursor {
+      row
+      col
+      visible
+    }
+    cells[row][col] {
+      glyph
+      width
+      attributes
+    }
+  }
+  foreground {
+    pgid
+    task_name
+    shell_returned
+  }
+}
+```
+
+This schema is intentionally conceptual rather than wire-final. Its purpose is to constrain Milestone 2 so that transport design follows an already-decided state model.
+
 ### Screen-oriented design questions
 
 Before implementing a separate screen transport or UI, the project needs explicit answers to the following questions.
