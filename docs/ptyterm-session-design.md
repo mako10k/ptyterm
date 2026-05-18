@@ -317,6 +317,412 @@ All daemon-backed status-producing operations should share the same output conve
 
 This should apply consistently to `send`, `recv`, `list`, and `buffer-info`.
 
+### Screen-oriented buffer access must stay separate from recv
+
+The existing `recv` contract is a sequential read from the shared session output stream.
+
+- It advances a server-side cursor unless `--peek` is used.
+- It is suitable for scripting, line matching, byte inspection, and incremental consumption.
+- It should not be repurposed into a terminal-state or screen-snapshot API.
+
+If the project adds terminal-style buffer acquisition later, that should use a separate transport contract and a separate user-facing operation.
+
+- Do not overload `recv` request semantics.
+- Do not change `buffer-info` into a screen-state envelope.
+- Do not infer a stable screen model from `recv` formatting flags.
+
+This separation keeps the existing byte-stream contract stable while allowing a much richer UI and state model for screen-oriented access.
+
+### Use-case-driven requirements
+
+The design should be anchored in concrete usage rather than in terminal theory alone.
+
+#### Use case 1: human operator checks a long-running task occasionally
+
+Scenario:
+
+- A human starts a long-running command in a managed session.
+- They check the session occasionally to confirm whether work is progressing, stalled, waiting for input, or finished.
+- They do not necessarily want to attach interactively every time.
+
+What this user needs:
+
+- a quick way to inspect the current visible terminal state
+- a readable representation of the current screen, not just a byte stream
+- a clear indication of whether the task is still active, waiting, or has returned to the shell
+
+Why `recv` is not enough:
+
+- `recv` answers “what bytes were emitted since my last read?”
+- this use case asks “what does the terminal look like now?”
+- a human checking sporadically usually wants the current snapshot, not a replay of all intermediate bytes
+
+Derived requirements:
+
+- The separate UI needs a human-readable snapshot mode.
+- The snapshot should default to the active visible screen.
+- The response should include lightweight session-state context such as foreground task identity and whether the foreground has returned to the shell.
+- The first human-oriented UI can ignore attributes visually, but it should not rule them out in the underlying data model.
+
+#### Use case 2: an LLM monitors a medium-running terminal task
+
+Scenario:
+
+- An LLM starts a task that expects a terminal.
+- It needs to wait for meaningful state changes rather than poll blindly.
+- Useful wait conditions include: a prompt appearing, a timeout elapsing, the foreground process changing, or control returning to the shell.
+
+What this user needs:
+
+- a machine-readable snapshot of terminal state
+- stable wait predicates over terminal state changes
+- a way to tell the difference between “no output yet”, “output changed but prompt not ready”, and “foreground command finished”
+
+Why `recv` is not enough:
+
+- prompt detection based only on raw output bytes is fragile
+- prompt bytes may be obscured by redraws, cursor movement, or full-screen applications
+- the agent often needs state-based waiting, not just byte arrival
+
+Derived requirements:
+
+- The separate transport should support structured snapshot output.
+- Waiting should be expressed against state predicates, not just byte-stream timeouts.
+- Useful first-class predicates include:
+  - visible screen changed
+  - foreground process group changed
+  - foreground returned to the shell
+  - cursor moved to a prompt-like location
+  - timeout expired without a matching state transition
+- Snapshot should be the canonical model; wait and delta features should be defined against snapshot generations or state versions.
+
+#### Use case 3: an LLM drives terminal-style workflows from a non-terminal context
+
+Scenario:
+
+- An LLM needs to perform workflows such as SSH login, remote shell navigation, or remote command execution.
+- The controlling side is not itself a human TTY.
+- The model must still reason about terminal prompts, password requests, redraws, alternate screens, and shell recovery.
+
+What this user needs:
+
+- a terminal state model that can be consumed programmatically
+- reliable send/wait/control loops that are defined in terms of terminal state
+- visibility into prompt state, cursor state, active screen, and possibly cell attributes
+
+Why `recv` is not enough:
+
+- raw bytes are not the same thing as terminal state
+- SSH and similar flows frequently involve prompt repainting, control sequences, and stateful screen changes
+- non-terminal control needs a stable automation contract, not a best-effort textual scrape
+
+Derived requirements:
+
+- The transport must distinguish stream access from terminal-state access.
+- The state model should explicitly represent at least:
+  - active screen identity
+  - visible grid contents
+  - cursor position and visibility
+  - foreground task identity
+  - a monotonic state version or generation for change tracking
+- Attributes and alternate-screen state should be part of the transport design even if the first CLI does not render them richly.
+- Long term, automation-oriented waiting and delta retrieval likely belong in the same family as screen-state access, not in `recv`.
+
+### What these use cases imply
+
+Across all three use cases, the design pressure is consistent.
+
+- Human inspection wants a readable snapshot.
+- Model monitoring wants machine-readable snapshot plus wait predicates.
+- Non-terminal control wants a stateful automation contract over the rendered terminal model.
+
+That leads to the following conclusions.
+
+- `recv` should remain a byte-stream operation.
+- Screen-state access should be defined as a separate transport family.
+- Snapshot is the right base abstraction for the first design pass.
+- Wait conditions and later delta modes should be layered on top of a versioned screen-state model.
+- Alternate screen, cursor state, and foreground-task state are not optional edge cases; they are core to the motivating use cases.
+
+### Milestone plan
+
+The project should stage this work so that `recv` compatibility remains intact and each step produces a usable, reviewable outcome.
+
+#### Milestone 0: freeze the existing contract
+
+Goal:
+
+- Make the non-goal explicit: screen-oriented access must not change `recv` or `buffer-info` semantics.
+
+Deliverables:
+
+- documented statement that `recv` remains a sequential byte-stream API
+- documented statement that new screen-oriented access will use a separate transport family and separate user-facing operation
+
+Exit criteria:
+
+- reviewers agree that existing `recv` wire behavior is a compatibility constraint, not a migration target
+
+Non-goals:
+
+- no new transport messages
+- no new CLI operations
+
+#### Milestone 1: define the canonical screen-state model
+
+Goal:
+
+- Decide what the new transport fundamentally returns before designing any CLI or wait behavior.
+
+Scope:
+
+- visible screen snapshot model
+- main / alt / active screen semantics
+- cursor position and visibility
+- foreground task identity and shell-return state
+- per-cell attribute model and versioning expectations
+- viewport versus scrollback boundary
+
+Deliverables:
+
+- a documented screen-state schema at the conceptual level
+- an explicit answer for whether v1 is snapshot-only
+- a documented statement of what is guaranteed in v1 versus deferred
+
+Exit criteria:
+
+- the data model is clear enough that a transport payload could be specified without reopening the use-case discussion
+
+Non-goals:
+
+- no delta protocol yet
+- no human-readable UI shape yet
+
+#### Milestone 2: define the structured transport
+
+Goal:
+
+- Specify the machine-readable transport for screen-state retrieval independently of any text UI.
+
+Scope:
+
+- request and response message shapes
+- versioning model for state snapshots
+- screen selector semantics such as `active`, `main`, and `alt`
+- error behavior and compatibility rules
+
+Deliverables:
+
+- transport message definitions
+- state generation or version semantics
+- explicit statement of what state transitions are observable in v1
+
+Exit criteria:
+
+- the transport can deliver full snapshots for use cases 2 and 3 without depending on text scraping
+
+Non-goals:
+
+- no delta retrieval yet unless it is required for transport correctness
+- no terminal rendering CLI yet
+
+#### Milestone 3: define state-based wait semantics
+
+Goal:
+
+- Add waiting and monitoring semantics on top of the structured state model.
+
+Scope:
+
+- timeout behavior
+- snapshot-changed detection
+- foreground process group change detection
+- shell-return detection
+- prompt-like readiness predicates if they can be specified robustly
+
+Deliverables:
+
+- a wait model defined in terms of terminal state, not output bytes
+- documented first-class wait predicates
+- documented failure and timeout behavior
+
+Exit criteria:
+
+- use case 2 can be expressed without overloading `recv` timeouts or byte matching as the primary mechanism
+
+Non-goals:
+
+- no human-oriented text formatting decisions yet
+- no fine-grained delta optimization unless needed by the wait model
+
+#### Milestone 4: add the first human-oriented UI
+
+Goal:
+
+- Expose a readable inspection command for humans checking long-running sessions occasionally.
+
+Scope:
+
+- one human-readable snapshot operation over the new transport
+- sensible defaults for active screen selection
+- concise session-state context such as foreground task and shell-return state
+
+Deliverables:
+
+- a user-facing snapshot command distinct from `recv`
+- help text and examples for occasional human inspection
+- tests covering at least normal shell output and alternate-screen behavior expectations
+
+Exit criteria:
+
+- use case 1 is satisfiable without attaching interactively and without reading raw `recv` output manually
+
+Non-goals:
+
+- no full-screen diff UI
+- no rich attribute rendering requirement in the first human-facing output
+
+#### Milestone 5: add automation-oriented UI and deltas if still needed
+
+Goal:
+
+- Add higher-level automation conveniences only after snapshot and wait semantics are proven.
+
+Possible scope:
+
+- machine-oriented CLI output modes
+- delta retrieval over versioned snapshots
+- richer prompt and readiness helpers
+- attribute-aware or structured cursor inspection helpers
+
+Deliverables:
+
+- only the features that remain justified after Milestones 2 through 4 are exercised
+
+Exit criteria:
+
+- use case 3 can be expressed through stable stateful automation primitives rather than ad hoc parsing
+
+Non-goals:
+
+- do not backfill complexity that the structured snapshot plus wait model already solved adequately
+
+### Milestone ordering rationale
+
+This ordering is intentional.
+
+- Milestone 0 protects compatibility before new work starts.
+- Milestone 1 prevents the UI from defining the transport accidentally.
+- Milestone 2 gives models and tools a stable machine contract.
+- Milestone 3 defines monitoring in state terms rather than byte-stream terms.
+- Milestone 4 serves the human inspection use case once the underlying contract is settled.
+- Milestone 5 is explicitly optional and should be justified by real usage, not by design completeness.
+
+### Screen-oriented design questions
+
+Before implementing a separate screen transport or UI, the project needs explicit answers to the following questions.
+
+#### 1. Primary access model
+
+Should the new operation be line-oriented, screen-oriented, or state-oriented?
+
+- Line-oriented: optimized for users who want visible text rows and do not care about hidden cells, wrapped state, or styling.
+- Screen-oriented: returns the current rendered grid, with rows and columns as the primary unit.
+- State-oriented: returns a richer terminal model including screen cells, cursor, attributes, scrollback, and alternate-screen state.
+
+Recommendation: treat screen-oriented access as the minimum viable separate UI. A line-oriented view can be derived from it, while a pure line-oriented API would lose too much information too early.
+
+#### 2. Main screen versus alternate screen
+
+Many full-screen programs use the terminal alternate screen buffer.
+
+Open questions:
+
+- Should the UI expose only the currently active screen?
+- Should callers be able to request `main`, `alt`, or `active` explicitly?
+- If the alternate screen is inactive, should its last contents be retained, cleared, or treated as unavailable?
+
+Recommendation: model main and alternate screens explicitly in the transport. The first UI can default to `active` while still leaving room for `--screen=main|alt|active` later.
+
+#### 3. Snapshot versus delta
+
+There are at least two useful access patterns.
+
+- Snapshot: return the full current screen state.
+- Delta: return only cells, cursor movement, or semantic changes since a prior token or generation.
+
+Open questions:
+
+- Is the first version snapshot-only?
+- What stability guarantee would a delta cursor or generation ID have?
+- Should deltas be cell-based, row-based, or event-based?
+
+Recommendation: start the design with snapshot as the canonical model and define delta later as a derived optimization. Otherwise the initial protocol risks baking in the wrong notion of change.
+
+#### 4. Attribute fidelity
+
+The screen model must decide whether cell attributes are part of the primary contract.
+
+Examples:
+
+- foreground and background color
+- bold, faint, italic, underline, blink, inverse, conceal, strikeout
+- wide characters and combining characters
+- hyperlink and OSC-derived metadata
+
+Open questions:
+
+- Is plain text enough for the first UI?
+- If attributes are returned, which subset is guaranteed stable?
+- Are attributes exposed only for the cursor cell, or for every visible cell?
+
+Recommendation: if a screen transport is added, define per-cell attributes in the transport even if the first text UI only renders plain text. Omitting them from the wire would make later extension much harder.
+
+#### 5. Scroll and scrollback semantics
+
+Screen access needs an explicit model for visible rows versus scrollback history.
+
+Open questions:
+
+- Is the operation about the visible viewport only, or also scrollback?
+- If scrollback is included, is it addressed by line count, absolute position, or a generation token?
+- How should apps that repaint the screen continuously interact with scrollback retention?
+
+Recommendation: separate viewport snapshot from scrollback history in both transport and UI. A single operation that tries to cover both usually ends up ambiguous.
+
+#### 6. Cursor and mode state
+
+The cursor is part of terminal state, not just a presentation detail.
+
+Open questions:
+
+- Should the response include cursor row, column, visibility, and shape?
+- Are insert mode, origin mode, wrap mode, and keypad mode part of the contract?
+- Does the user-facing UI need them all, or only the transport?
+
+Recommendation: include cursor position and visibility in the base model. Other terminal modes can be versioned in later once there is a concrete consumer.
+
+#### 7. User-facing UI shape
+
+The user-facing command should be chosen after the data model is stable.
+
+Candidate directions:
+
+- a text-oriented snapshot command for human inspection
+- a structured snapshot command for tooling
+- a later delta-oriented command once change semantics are well defined
+
+The important point is not the final option name. The important point is that this UI must be distinct from `recv` and documented as operating on rendered terminal state rather than the raw session output stream.
+
+### Recommended sequencing
+
+To avoid mixing contracts, the work should proceed in this order.
+
+1. Preserve the current `recv` and `buffer-info` wire contracts unchanged.
+2. Define the screen-state data model independently from `recv`.
+3. Decide whether the first consumer is a human-readable snapshot UI, a structured machine-readable UI, or both.
+4. Add the new transport and UI only after the above questions are answered explicitly.
+
 ### Future daemon-backed creation mode
 
 If daemon-backed session creation is added later, it should follow the same operation-first pattern rather than overloading the standalone default.

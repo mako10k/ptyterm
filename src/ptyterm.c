@@ -12,7 +12,6 @@
 #include <limits.h>
 #include <locale.h>
 #include <stdarg.h>
-#include <ctype.h>
 #include <pty.h>
 #include <signal.h>
 #include <stdio.h>
@@ -65,6 +64,9 @@ static void print_create_status(const struct ptyterm_create_response *response,
                                 const char *socket_path);
 static void print_buffer_info_status(
   const struct ptyterm_buffer_info_response *response, int status_format);
+static int request_buffer_info_client(
+  const char *socket_path, int session_id,
+  struct ptyterm_buffer_info_response *response_out);
 static void print_detach_status(const struct ptyterm_detach_response *response,
                 int status_format);
 static void print_resize_status(const struct ptyterm_resize_response *response,
@@ -753,8 +755,9 @@ static int run_list_client(const char *socket_path, int session_id) {
   }
 }
 
-static int run_buffer_info_client(const char *socket_path, int session_id,
-                                  int status_format) {
+static int request_buffer_info_client(
+  const char *socket_path, int session_id,
+  struct ptyterm_buffer_info_response *response_out) {
   char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
   char payload[4096];
   struct ptyterm_buffer_info_request request;
@@ -794,7 +797,7 @@ static int run_buffer_info_client(const char *socket_path, int session_id,
     }
 
     response = (const struct ptyterm_buffer_info_response *)payload;
-    print_buffer_info_status(response, status_format);
+    *response_out = *response;
     return EXIT_SUCCESS;
   }
   case PTYTERM_MESSAGE_ERROR: {
@@ -812,6 +815,19 @@ static int run_buffer_info_client(const char *socket_path, int session_id,
     fprintf(stderr, "unexpected response type: %u\n", header.type);
     return EXIT_FAILURE;
   }
+}
+
+static int run_buffer_info_client(const char *socket_path, int session_id,
+                                  int status_format) {
+  struct ptyterm_buffer_info_response response;
+
+  if (request_buffer_info_client(socket_path, session_id, &response) !=
+      EXIT_SUCCESS) {
+    return EXIT_FAILURE;
+  }
+
+  print_buffer_info_status(&response, status_format);
+  return EXIT_SUCCESS;
 }
 
 static int run_create_client(const char *socket_path, int cmd_argc,
@@ -1436,7 +1452,7 @@ static int run_recv_client(const char *socket_path, int session_id,
 
   if (recv_until == NULL && recv_timeout_ms == 0)
     return request_recv_client(socket_path, session_id, recv_size, recv_peek,
-                               payload, sizeof(payload), &response) == EXIT_SUCCESS
+                   payload, sizeof(payload), &response) == EXIT_SUCCESS
                ? print_recv_payload_and_status(response, NULL, recv_format,
                                                recv_control_mode)
                : EXIT_FAILURE;
@@ -1459,7 +1475,7 @@ static int run_recv_client(const char *socket_path, int session_id,
     uint64_t now_ms;
 
     if (request_recv_client(socket_path, session_id, recv_size, 1, payload,
-                            sizeof(payload), &response) != EXIT_SUCCESS)
+                sizeof(payload), &response) != EXIT_SUCCESS)
       return EXIT_FAILURE;
 
     data = (const char *)(response + 1);
@@ -2357,7 +2373,7 @@ int main(int argc, char *const argv[]) {
   if (((attach_requested != 0) + (create_requested != 0) +
        (daemon_status_requested != 0) + (daemon_stop_requested != 0) +
        (detach_requested != 0) + (list_requested != 0) +
-       (resize_requested != 0) + (buffer_info_requested != 0) +
+      (resize_requested != 0) + (buffer_info_requested != 0) +
        (recv_requested != 0) + (send_data != NULL) +
        (filter_mode != PTYTERM_FILTER_MODE_NONE)) > 1) {
     return usage_error(argv[0],
