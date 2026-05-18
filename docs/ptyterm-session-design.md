@@ -764,6 +764,118 @@ terminal_snapshot {
 
 This schema is intentionally conceptual rather than wire-final. Its purpose is to constrain Milestone 2 so that transport design follows an already-decided state model.
 
+### Milestone 2 decision: structured snapshot transport
+
+The structured transport for screen-oriented access is a separate message family from `recv`.
+
+#### 1. Separate operation family
+
+The new transport must not reuse `RECV` request or response messages.
+
+Instead, it introduces a new snapshot-oriented family with its own semantics.
+
+Conceptual operations for v1:
+
+- `SCREEN_SNAPSHOT_REQUEST`
+- `SCREEN_SNAPSHOT_RESPONSE`
+
+This family is defined in terms of terminal snapshots, not byte ranges.
+
+#### 2. Request shape
+
+The conceptual request for v1 is:
+
+```text
+screen_snapshot_request {
+  session_id
+  screen_selector: active|main|alt
+}
+```
+
+Rules:
+
+- `session_id` is required.
+- `screen_selector` is required at the transport level even if a user-facing CLI later defaults it.
+- The request does not include byte offsets.
+- The request does not include wait conditions.
+- The request does not include delta cursors.
+
+This keeps Milestone 2 focused on deterministic snapshot retrieval only.
+
+#### 3. Response shape
+
+The conceptual response for v1 is:
+
+```text
+screen_snapshot_response {
+  session_id
+  generation
+  selected_screen
+  session_state
+  foreground {
+    pgid
+    task_name
+    shell_returned
+  }
+  viewport {
+    rows
+    cols
+    cursor {
+      row
+      col
+      visible
+    }
+    cells[]
+  }
+}
+```
+
+Rules:
+
+- The response returns one complete snapshot.
+- The response is self-describing enough that a client does not need `buffer-info` or `recv` to interpret it.
+- The response uses snapshot `generation` as the state-tracking token for later milestones.
+- The response may describe `main`, `alt`, or `active`, but it always says which screen was actually returned.
+
+#### 4. Error behavior
+
+The snapshot transport should use the same broad control-plane error style as existing daemon operations while keeping the meaning snapshot-specific.
+
+The transport should distinguish at least:
+
+- session not found
+- screen state unavailable for the requested selector
+- session exited and no retained snapshot available
+- protocol or payload error
+
+The exact wire encoding can follow the existing control-plane error response style. What matters at this stage is that these errors are defined in terms of snapshot semantics rather than byte-stream semantics.
+
+#### 5. Compatibility rule
+
+Adding snapshot transport must not alter the meaning of any existing operation.
+
+- `recv` remains a sequential output-stream read.
+- `buffer-info` remains buffer metadata, not screen metadata.
+- Existing clients that do not know about snapshot transport continue to function unchanged.
+
+This means the new transport should be additive, not a reinterpretation of existing messages.
+
+#### 6. Why snapshot transport is enough for Milestone 2
+
+This transport already supports the core non-human use cases.
+
+- An LLM can request a machine-readable terminal snapshot.
+- A non-terminal controller can reason about prompts, cursor location, and active screen without text scraping.
+- Humans are not yet the target of this layer; their dedicated UI belongs to Milestone 4.
+
+What it does not try to solve yet:
+
+- waiting for future changes
+- requesting only differences
+- presenting a friendly text rendering
+
+Those features depend on the snapshot contract, but they should not complicate the initial transport definition.
+
 ### Screen-oriented design questions
 
 Before implementing a separate screen transport or UI, the project needs explicit answers to the following questions.
