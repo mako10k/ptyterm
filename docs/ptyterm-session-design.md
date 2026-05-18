@@ -876,6 +876,113 @@ What it does not try to solve yet:
 
 Those features depend on the snapshot contract, but they should not complicate the initial transport definition.
 
+### Milestone 3 decision: state-based wait semantics
+
+Wait behavior is defined in terms of snapshot state transitions, not in terms of raw output bytes.
+
+#### 1. Separate wait operation family
+
+Waiting should use a separate operation family layered on top of snapshot generations.
+
+Conceptual operations for v1:
+
+- `SCREEN_WAIT_REQUEST`
+- `SCREEN_WAIT_RESPONSE`
+
+These operations do not replace snapshot retrieval. They describe how a client waits for a later snapshot satisfying a state predicate.
+
+#### 2. Wait baseline
+
+Each wait request is anchored to an observed baseline.
+
+Conceptually:
+
+```text
+screen_wait_request {
+  session_id
+  baseline_generation
+  timeout_ms
+  predicate
+}
+```
+
+Rules:
+
+- `baseline_generation` is required.
+- `timeout_ms` is required.
+- A wait succeeds only if a later snapshot satisfies the requested predicate.
+- A timeout returns a structured timeout result rather than reusing `recv` timeout wording.
+
+This keeps waiting stateful and explicit.
+
+#### 3. First-class v1 predicates
+
+The first version should support only predicates that can be defined robustly from the canonical snapshot model.
+
+Required predicates for v1:
+
+- `snapshot_changed`
+  - succeeds when any later snapshot generation exists
+- `foreground_changed`
+  - succeeds when the foreground process group identity differs from the baseline snapshot
+- `shell_returned`
+  - succeeds when the later snapshot indicates that control has returned to the session shell
+- `session_exited`
+  - succeeds when the session state becomes exited
+
+Optional but still state-based predicate:
+
+- `cursor_changed`
+  - succeeds when cursor position or visibility differs from baseline
+
+These predicates directly support use case 2 and most of use case 3 without introducing prompt heuristics prematurely.
+
+#### 4. v1 non-goal: prompt-specific matching
+
+Prompt-specific matching should not be part of the initial wait contract.
+
+Reasons:
+
+- prompts are shell-specific and highly configurable
+- many prompts are expressed through redraws rather than stable appended text
+- prompt matching often wants policy and user configuration, not transport semantics
+
+Instead, prompt-specific helpers can be layered later on top of snapshot retrieval and baseline wait primitives.
+
+#### 5. Wait result shape
+
+The wait response should always identify both the outcome and the snapshot that resolved it.
+
+Conceptually:
+
+```text
+screen_wait_response {
+  session_id
+  outcome: matched|timeout|session_exited|error
+  matched_predicate
+  snapshot
+}
+```
+
+Rules:
+
+- A successful wait returns the resolving snapshot.
+- A timeout may return the latest known snapshot if that is useful, but timeout must remain distinguishable from predicate match.
+- `session_exited` is a distinct outcome even if no predicate matched first.
+
+This avoids forcing clients to perform an extra fetch just to learn what state ended the wait.
+
+#### 6. Why this is enough for v1
+
+This wait model already supports the core automation loop.
+
+- fetch a baseline snapshot
+- issue input if needed
+- wait on `snapshot_changed`, `foreground_changed`, `shell_returned`, or `session_exited`
+- inspect the returned snapshot and decide the next action
+
+It is intentionally narrower than a generalized event subscription system. The goal is to support reliable terminal workflows first, not to provide a fully generic reactive protocol.
+
 ### Screen-oriented design questions
 
 Before implementing a separate screen transport or UI, the project needs explicit answers to the following questions.
