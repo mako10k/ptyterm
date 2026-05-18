@@ -955,11 +955,58 @@ static void print_snapshot_rows(const char *cells, uint16_t rows, uint16_t cols)
   }
 }
 
+static int write_snapshot_kv_escaped(const char *data, size_t size) {
+  size_t offset;
+
+  for (offset = 0; offset < size; ++offset) {
+    unsigned char byte;
+
+    byte = (unsigned char)data[offset];
+    if (byte >= 0x21 && byte <= 0x7e && byte != '\\') {
+      if (fputc(byte, stdout) == EOF) {
+        perror("fputc");
+        return EXIT_FAILURE;
+      }
+      continue;
+    }
+
+    if (fprintf(stdout, "\\x%02x", byte) < 0) {
+      perror("fprintf");
+      return EXIT_FAILURE;
+    }
+  }
+
+  return EXIT_SUCCESS;
+}
+
+static int print_snapshot_rows_kv(const char *cells, uint16_t rows,
+                                  uint16_t cols) {
+  uint16_t row;
+
+  for (row = 0; row < rows; ++row) {
+    if (printf("row_%u=", (unsigned int)row + 1) < 0) {
+      perror("printf");
+      return EXIT_FAILURE;
+    }
+    if (write_snapshot_kv_escaped(cells + (size_t)row * cols, cols) !=
+        EXIT_SUCCESS) {
+      return EXIT_FAILURE;
+    }
+    if (fputc('\n', stdout) == EOF) {
+      perror("fputc");
+      return EXIT_FAILURE;
+    }
+  }
+
+  return EXIT_SUCCESS;
+}
+
 static int run_snapshot_client(const char *socket_path, int session_id,
-                               uint32_t screen_selector) {
+                               uint32_t screen_selector, int status_format) {
   struct ptyterm_screen_snapshot_response response;
   char *cells;
   const char *fg_task;
+  int result;
 
   if (request_screen_snapshot_client(socket_path, session_id, screen_selector,
                                      &response, &cells) != EXIT_SUCCESS) {
@@ -967,22 +1014,39 @@ static int run_snapshot_client(const char *socket_path, int session_id,
   }
 
   fg_task = response.fg_task[0] != '\0' ? response.fg_task : "-";
-  printf("session id: %u\n", response.session_id);
-  printf("screen: %s\n", ptyterm_screen_selector_name(response.selected_screen));
-  printf("state: %s\n", ptyterm_session_state_name(response.state));
-  printf("generation: %llu\n", (unsigned long long)response.generation);
-  printf("foreground pgid: %d\n", response.fg_pgid);
-  printf("foreground task: %s\n", fg_task);
-  printf("shell returned: %s\n", response.shell_returned ? "yes" : "no");
-  printf("rows: %u\n", response.rows);
-  printf("cols: %u\n", response.cols);
-  printf("cursor row: %u\n", (unsigned int)response.cursor_row + 1);
-  printf("cursor col: %u\n", (unsigned int)response.cursor_col + 1);
-  printf("cursor visible: %s\n", response.cursor_visible ? "yes" : "no");
-  printf("\n");
-  print_snapshot_rows(cells, response.rows, response.cols);
+  result = EXIT_SUCCESS;
+  if (status_format == PTYTERM_STATUS_FORMAT_TEXT) {
+    printf("session id: %u\n", response.session_id);
+    printf("screen: %s\n", ptyterm_screen_selector_name(response.selected_screen));
+    printf("state: %s\n", ptyterm_session_state_name(response.state));
+    printf("generation: %llu\n", (unsigned long long)response.generation);
+    printf("foreground pgid: %d\n", response.fg_pgid);
+    printf("foreground task: %s\n", fg_task);
+    printf("shell returned: %s\n", response.shell_returned ? "yes" : "no");
+    printf("rows: %u\n", response.rows);
+    printf("cols: %u\n", response.cols);
+    printf("cursor row: %u\n", (unsigned int)response.cursor_row + 1);
+    printf("cursor col: %u\n", (unsigned int)response.cursor_col + 1);
+    printf("cursor visible: %s\n", response.cursor_visible ? "yes" : "no");
+    printf("\n");
+    print_snapshot_rows(cells, response.rows, response.cols);
+  } else {
+    printf("session_id=%u\n", response.session_id);
+    printf("screen=%s\n", ptyterm_screen_selector_name(response.selected_screen));
+    printf("state=%s\n", ptyterm_session_state_name(response.state));
+    printf("generation=%llu\n", (unsigned long long)response.generation);
+    printf("foreground_pgid=%d\n", response.fg_pgid);
+    printf("foreground_task=%s\n", fg_task);
+    printf("shell_returned=%s\n", response.shell_returned ? "yes" : "no");
+    printf("rows=%u\n", response.rows);
+    printf("cols=%u\n", response.cols);
+    printf("cursor_row=%u\n", (unsigned int)response.cursor_row + 1);
+    printf("cursor_col=%u\n", (unsigned int)response.cursor_col + 1);
+    printf("cursor_visible=%s\n", response.cursor_visible ? "yes" : "no");
+    result = print_snapshot_rows_kv(cells, response.rows, response.cols);
+  }
   free(cells);
-  return EXIT_SUCCESS;
+  return result;
 }
 
 static int run_create_client(const char *socket_path, int cmd_argc,
@@ -2301,6 +2365,7 @@ int main(int argc, char *const argv[]) {
   int recv_requested = 0;
   int screen_selector = PTYTERM_SCREEN_SELECTOR_ACTIVE;
   int status_format = PTYTERM_STATUS_FORMAT_KV;
+  int status_format_explicit = 0;
   const char *send_data = NULL;
   uint32_t recv_size = 4096;
   int session_id = PTYTERM_SESSION_ALL;
@@ -2406,6 +2471,7 @@ int main(int argc, char *const argv[]) {
       status_format = parse_status_format(optarg);
       if (status_format < 0)
         return usage_error(argv[0], "unsupported status format: %s", optarg);
+      status_format_explicit = 1;
       break;
     case 'D':
       detach_requested = 1;
@@ -2619,7 +2685,9 @@ int main(int argc, char *const argv[]) {
       return run_send_client(socket_path, session_id, send_data);
     if (snapshot_requested)
       return run_snapshot_client(socket_path, session_id,
-                                 (uint32_t)screen_selector);
+                                 (uint32_t)screen_selector,
+                                 status_format_explicit ? status_format
+                                                        : PTYTERM_STATUS_FORMAT_TEXT);
     if (recv_requested)
       return run_recv_client(socket_path, session_id, recv_size, recv_peek,
                              recv_timeout_ms, recv_until, recv_format,
