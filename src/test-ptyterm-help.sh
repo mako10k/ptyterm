@@ -108,6 +108,18 @@ printf '%s\n' "$out" | grep -q -- "--recv" || {
   exit 1
 }
 
+printf '%s\n' "$out" | grep -q -- "--snapshot" || {
+  echo "ptyterm -h: expected snapshot option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--screen=active|main|alt" || {
+  echo "ptyterm -h: expected screen option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
 printf '%s\n' "$out" | grep -q -- "--recv-format=raw|escaped" || {
   echo "ptyterm -h: expected recv-format option in output" >&2
   printf '%s\n' "$out" >&2
@@ -140,6 +152,12 @@ printf '%s\n' "$out" | grep -q -- "--session=1 --send='echo hello\\\\n'" || {
 
 printf '%s\n' "$out" | grep -q -- "--session=1 --recv" || {
   echo "ptyterm -h: expected recv example in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--session=1 --snapshot" || {
+  echo "ptyterm -h: expected snapshot example in output" >&2
   printf '%s\n' "$out" >&2
   exit 1
 }

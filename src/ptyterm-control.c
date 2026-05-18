@@ -246,6 +246,35 @@ ssize_t ptyterm_recv_message(int fd, struct ptyterm_message_header *header,
   return (ssize_t)header->size;
 }
 
+ssize_t ptyterm_recv_message_alloc(int fd, struct ptyterm_message_header *header,
+                                   void **payload_out) {
+  void *payload;
+
+  *payload_out = NULL;
+  if (read_all(fd, header, sizeof(*header)) == -1)
+    return -1;
+
+  if (header->magic != PTYTERM_CONTROL_MAGIC ||
+      header->version != PTYTERM_CONTROL_VERSION) {
+    errno = EPROTO;
+    return -1;
+  }
+
+  if (header->size == 0)
+    return 0;
+
+  payload = malloc(header->size);
+  if (payload == NULL)
+    return -1;
+  if (read_all(fd, payload, header->size) == -1) {
+    free(payload);
+    return -1;
+  }
+
+  *payload_out = payload;
+  return (ssize_t)header->size;
+}
+
 const char *ptyterm_session_state_name(uint32_t state) {
   switch (state) {
   case PTYTERM_SESSION_ATTACHED:
@@ -254,6 +283,19 @@ const char *ptyterm_session_state_name(uint32_t state) {
     return "detached";
   case PTYTERM_SESSION_EXITED:
     return "exited";
+  default:
+    return "unknown";
+  }
+}
+
+const char *ptyterm_screen_selector_name(uint32_t selector) {
+  switch (selector) {
+  case PTYTERM_SCREEN_SELECTOR_ACTIVE:
+    return "active";
+  case PTYTERM_SCREEN_SELECTOR_MAIN:
+    return "main";
+  case PTYTERM_SCREEN_SELECTOR_ALT:
+    return "alt";
   default:
     return "unknown";
   }

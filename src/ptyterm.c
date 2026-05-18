@@ -54,6 +54,7 @@ static void restore_termios_handler(void);
 static void attach_size_changed(int sig);
 static int parse_status_format(const char *value);
 static int parse_help_format(const char *value);
+static int parse_screen_selector(const char *value);
 static int parse_duration_ms(const char *value, uint64_t *duration_ms_out);
 static int monotonic_time_ms(uint64_t *time_ms_out);
 static void print_help(FILE *out, const char *program_name, int help_format);
@@ -139,6 +140,16 @@ static int parse_recv_control_mode(const char *value) {
   return -1;
 }
 
+static int parse_screen_selector(const char *value) {
+  if (strcmp(value, "active") == 0)
+    return PTYTERM_SCREEN_SELECTOR_ACTIVE;
+  if (strcmp(value, "main") == 0)
+    return PTYTERM_SCREEN_SELECTOR_MAIN;
+  if (strcmp(value, "alt") == 0)
+    return PTYTERM_SCREEN_SELECTOR_ALT;
+  return -1;
+}
+
 static int parse_duration_ms(const char *value, uint64_t *duration_ms_out) {
   char *end;
   unsigned long long number;
@@ -212,6 +223,7 @@ static void print_management_examples(FILE *out, const char *program_name) {
           program_name);
   fprintf(out, "  %s --session=1 --send='echo hello\\n'\n", program_name);
   fprintf(out, "  %s --session=1 --recv\n", program_name);
+  fprintf(out, "  %s --session=1 --snapshot\n", program_name);
   fprintf(out, "  %s --help\n", program_name);
   fprintf(out, "\n");
 }
@@ -245,6 +257,8 @@ static void print_text_help(FILE *out, const char *program_name) {
   fprintf(out, "  -B, --buffer-info   : show buffer state for one session\n");
   fprintf(out, "      --send=DATA     : send decoded bytes to one session\n");
   fprintf(out, "      --recv          : receive buffered output from one session\n");
+  fprintf(out, "      --snapshot      : show a readable terminal snapshot for one session\n");
+  fprintf(out, "      --screen=active|main|alt : select which screen snapshot to inspect (default: active)\n");
   fprintf(out, "      --recv-format=raw|escaped : select recv payload rendering (default: escaped on TTY stdout, raw otherwise)\n");
   fprintf(out, "      --recv-control=without|with : drop control characters from recv payload unless explicitly kept\n");
   fprintf(out, "      --recv-size=N   : maximum bytes returned by --recv\n");
@@ -372,6 +386,17 @@ static void print_yaml_help(FILE *out, const char *program_name) {
   fprintf(out, "      argument: none\n");
   fprintf(out, "      requires: [--session]\n");
   fprintf(out, "      description: Receive buffered output from one session.\n");
+  fprintf(out, "    - long: --snapshot\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      requires: [--session]\n");
+  fprintf(out, "      description: Show a readable terminal snapshot for one session.\n");
+  fprintf(out, "    - long: --screen\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: active|main|alt\n");
+  fprintf(out, "      default: active\n");
+  fprintf(out, "      requires: [--snapshot]\n");
+  fprintf(out, "      description: Select which terminal screen snapshot to inspect.\n");
   fprintf(out, "    - long: --recv-format\n");
   fprintf(out, "      short: null\n");
   fprintf(out, "      argument: raw|escaped\n");
@@ -431,6 +456,8 @@ static void print_yaml_help(FILE *out, const char *program_name) {
       program_name);
     fprintf(out, "  - description: Receive buffered output from one managed session\n");
     fprintf(out, "    command: \"%s --session=1 --recv\"\n", program_name);
+    fprintf(out, "  - description: Show a terminal snapshot for one managed session\n");
+    fprintf(out, "    command: \"%s --session=1 --snapshot\"\n", program_name);
   fprintf(out, "notes:\n");
   fprintf(out, "  - Exactly one management operation may be selected per invocation.\n");
   fprintf(out, "  - Management operations cannot be combined with standalone run output redirection except attach.\n");
@@ -827,6 +854,134 @@ static int run_buffer_info_client(const char *socket_path, int session_id,
   }
 
   print_buffer_info_status(&response, status_format);
+  return EXIT_SUCCESS;
+}
+
+static int request_screen_snapshot_client(
+    const char *socket_path, int session_id, uint32_t screen_selector,
+    struct ptyterm_screen_snapshot_response *response_out, char **cells_out) {
+  char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
+  struct ptyterm_screen_snapshot_request request;
+  struct ptyterm_message_header header;
+  struct ptyterm_screen_snapshot_response *response;
+  char *payload;
+  ssize_t payload_size;
+  size_t expected_size;
+  int fd;
+
+  *cells_out = NULL;
+  fd = connect_daemon_socket(socket_path, default_socket_path, 1);
+  if (fd == -1) {
+    perror(socket_path);
+    return EXIT_FAILURE;
+  }
+
+  request.session_id = session_id;
+  request.screen_selector = screen_selector;
+  if (ptyterm_send_message(fd, PTYTERM_MESSAGE_SCREEN_SNAPSHOT_REQUEST, &request,
+                           sizeof(request)) == -1) {
+    perror("send");
+    close(fd);
+    return EXIT_FAILURE;
+  }
+
+  payload = NULL;
+  payload_size = ptyterm_recv_message_alloc(fd, &header, (void **)&payload);
+  if (payload_size == -1) {
+    perror("recv");
+    close(fd);
+    return EXIT_FAILURE;
+  }
+
+  close(fd);
+  switch (header.type) {
+  case PTYTERM_MESSAGE_SCREEN_SNAPSHOT_RESPONSE:
+    if ((size_t)payload_size < sizeof(*response_out)) {
+      fprintf(stderr, "invalid snapshot response size\n");
+      free(payload);
+      return EXIT_FAILURE;
+    }
+    response = (struct ptyterm_screen_snapshot_response *)payload;
+    expected_size = sizeof(*response) + (size_t)response->rows * response->cols;
+    if ((size_t)payload_size != expected_size) {
+      fprintf(stderr, "invalid snapshot payload size\n");
+      free(payload);
+      return EXIT_FAILURE;
+    }
+    *response_out = *response;
+    *cells_out = malloc((size_t)response->rows * response->cols);
+    if (*cells_out == NULL) {
+      perror("malloc");
+      free(payload);
+      return EXIT_FAILURE;
+    }
+    memcpy(*cells_out, response + 1, (size_t)response->rows * response->cols);
+    free(payload);
+    return EXIT_SUCCESS;
+  case PTYTERM_MESSAGE_ERROR: {
+    const struct ptyterm_error_response *error_response;
+
+    if ((size_t)payload_size < sizeof(*error_response)) {
+      fprintf(stderr, "short error response\n");
+      free(payload);
+      return EXIT_FAILURE;
+    }
+    error_response = (const struct ptyterm_error_response *)payload;
+    fprintf(stderr, "%s\n", error_response->message);
+    free(payload);
+    return EXIT_FAILURE;
+  }
+  default:
+    fprintf(stderr, "unexpected response type: %u\n", header.type);
+    free(payload);
+    return EXIT_FAILURE;
+  }
+}
+
+static void print_snapshot_rows(const char *cells, uint16_t rows, uint16_t cols) {
+  uint16_t row;
+
+  for (row = 0; row < rows; ++row) {
+    const char *line;
+    size_t used;
+
+    line = cells + (size_t)row * cols;
+    used = cols;
+    while (used > 0 && line[used - 1] == ' ')
+      used -= 1;
+    if (used > 0)
+      fwrite(line, 1, used, stdout);
+    fputc('\n', stdout);
+  }
+}
+
+static int run_snapshot_client(const char *socket_path, int session_id,
+                               uint32_t screen_selector) {
+  struct ptyterm_screen_snapshot_response response;
+  char *cells;
+  const char *fg_task;
+
+  if (request_screen_snapshot_client(socket_path, session_id, screen_selector,
+                                     &response, &cells) != EXIT_SUCCESS) {
+    return EXIT_FAILURE;
+  }
+
+  fg_task = response.fg_task[0] != '\0' ? response.fg_task : "-";
+  printf("session id: %u\n", response.session_id);
+  printf("screen: %s\n", ptyterm_screen_selector_name(response.selected_screen));
+  printf("state: %s\n", ptyterm_session_state_name(response.state));
+  printf("generation: %llu\n", (unsigned long long)response.generation);
+  printf("foreground pgid: %d\n", response.fg_pgid);
+  printf("foreground task: %s\n", fg_task);
+  printf("shell returned: %s\n", response.shell_returned ? "yes" : "no");
+  printf("rows: %u\n", response.rows);
+  printf("cols: %u\n", response.cols);
+  printf("cursor row: %u\n", (unsigned int)response.cursor_row + 1);
+  printf("cursor col: %u\n", (unsigned int)response.cursor_col + 1);
+  printf("cursor visible: %s\n", response.cursor_visible ? "yes" : "no");
+  printf("\n");
+  print_snapshot_rows(cells, response.rows, response.cols);
+  free(cells);
   return EXIT_SUCCESS;
 }
 
@@ -2135,6 +2290,7 @@ int main(int argc, char *const argv[]) {
   int help_requested = 0;
   int help_format = PTYTERM_HELP_FORMAT_TEXT;
   int list_requested = 0;
+  int snapshot_requested = 0;
   int recv_peek = 0;
   int recv_format = PTYTERM_RECV_FORMAT_AUTO;
   int recv_control_mode = PTYTERM_RECV_CONTROL_WITHOUT;
@@ -2143,6 +2299,7 @@ int main(int argc, char *const argv[]) {
   uint64_t recv_timeout_ms = 0;
   int resize_requested = 0;
   int recv_requested = 0;
+  int screen_selector = PTYTERM_SCREEN_SELECTOR_ACTIVE;
   int status_format = PTYTERM_STATUS_FORMAT_KV;
   const char *send_data = NULL;
   uint32_t recv_size = 4096;
@@ -2167,6 +2324,8 @@ int main(int argc, char *const argv[]) {
       OPT_RECV_TIMEOUT,
       OPT_RECV_UNTIL,
       OPT_PEEK,
+      OPT_SNAPSHOT,
+      OPT_SCREEN,
       OPT_DAEMON_STATUS,
       OPT_DAEMON_STOP,
       OPT_HELP_FORMAT,
@@ -2195,6 +2354,8 @@ int main(int argc, char *const argv[]) {
                        {"recv-timeout", required_argument, NULL, OPT_RECV_TIMEOUT},
                        {"recv-until", required_argument, NULL, OPT_RECV_UNTIL},
                        {"peek", no_argument, NULL, OPT_PEEK},
+                       {"snapshot", no_argument, NULL, OPT_SNAPSHOT},
+                       {"screen", required_argument, NULL, OPT_SCREEN},
                        {"socket", required_argument, NULL, 's'},
                        {"buffer-info", no_argument, NULL, 'B'},
                        {"list", no_argument, NULL, 'L'},
@@ -2277,6 +2438,14 @@ int main(int argc, char *const argv[]) {
     case OPT_PEEK:
       recv_peek = 1;
       break;
+    case OPT_SNAPSHOT:
+      snapshot_requested = 1;
+      break;
+    case OPT_SCREEN:
+      screen_selector = parse_screen_selector(optarg);
+      if (screen_selector < 0)
+        return usage_error(argv[0], "unsupported screen selector: %s", optarg);
+      break;
     case OPT_RECV_SIZE:
       recv_size = (uint32_t)strtoul(optarg, &p, 0);
       if (optarg == p || *p != '\0' || recv_size == 0)
@@ -2346,6 +2515,8 @@ int main(int argc, char *const argv[]) {
 
   if (recv_peek && !recv_requested)
     return usage_error(argv[0], "--peek requires --recv");
+  if (screen_selector != PTYTERM_SCREEN_SELECTOR_ACTIVE && !snapshot_requested)
+    return usage_error(argv[0], "--screen requires --snapshot");
   if (recv_format != PTYTERM_RECV_FORMAT_AUTO && !recv_requested)
     return usage_error(argv[0], "--recv-format requires --recv");
   if (recv_control_mode != PTYTERM_RECV_CONTROL_WITHOUT && !recv_requested)
@@ -2364,7 +2535,8 @@ int main(int argc, char *const argv[]) {
       (daemon_status_requested != 0) + (daemon_stop_requested != 0) +
       (detach_requested != 0) + (list_requested != 0) +
       (resize_requested != 0) +
-          (buffer_info_requested != 0) + (recv_requested != 0) +
+        (buffer_info_requested != 0) + (recv_requested != 0) +
+        (snapshot_requested != 0) +
           (send_data != NULL) >
       1) {
     return usage_error(argv[0], "select only one management operation");
@@ -2374,7 +2546,8 @@ int main(int argc, char *const argv[]) {
        (daemon_status_requested != 0) + (daemon_stop_requested != 0) +
        (detach_requested != 0) + (list_requested != 0) +
       (resize_requested != 0) + (buffer_info_requested != 0) +
-       (recv_requested != 0) + (send_data != NULL) +
+      (recv_requested != 0) + (snapshot_requested != 0) +
+      (send_data != NULL) +
        (filter_mode != PTYTERM_FILTER_MODE_NONE)) > 1) {
     return usage_error(argv[0],
                        "select only one management or filter operation");
@@ -2400,7 +2573,7 @@ int main(int argc, char *const argv[]) {
       daemon_stop_requested || detach_requested ||
       resize_requested ||
       list_requested || buffer_info_requested ||
-      recv_requested || send_data != NULL) {
+      recv_requested || snapshot_requested || send_data != NULL) {
     if ((ifile || ofile || afile ||
          ((opt_cols > 0 || opt_lines > 0) && !resize_requested)) &&
         !attach_requested) {
@@ -2444,6 +2617,9 @@ int main(int argc, char *const argv[]) {
     }
     if (send_data != NULL)
       return run_send_client(socket_path, session_id, send_data);
+    if (snapshot_requested)
+      return run_snapshot_client(socket_path, session_id,
+                                 (uint32_t)screen_selector);
     if (recv_requested)
       return run_recv_client(socket_path, session_id, recv_size, recv_peek,
                              recv_timeout_ms, recv_until, recv_format,

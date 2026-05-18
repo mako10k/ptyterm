@@ -5,6 +5,7 @@
 #endif
 
 #include "ptyterm-control.h"
+#include "ptyterm-screen.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -45,6 +46,7 @@ struct ptyterm_session {
   size_t ring_start;
   size_t ring_len;
   char *output_ring;
+  struct ptyterm_screen_state screen;
   char tty_name[PTYTERM_TTY_NAME_MAX];
   char command[PTYTERM_COMMAND_MAX];
 };
@@ -241,6 +243,8 @@ static int apply_session_winsize(struct ptyterm_session *session,
   winsize.ws_col = cols;
   if (ioctl(session->master_fd, TIOCSWINSZ, &winsize) == -1)
     return -1;
+  if (ptyterm_screen_resize(&session->screen, rows, cols) == -1)
+    return -1;
   return 0;
 }
 
@@ -330,6 +334,19 @@ static int open_session_pty(char **slave_name_out) {
 
 static int open_slave_fd(const char *slave_name) {
   return open(slave_name, O_RDWR);
+}
+
+static void default_screen_size(int fd, uint16_t *rows_out, uint16_t *cols_out) {
+  struct winsize winsize;
+
+  *rows_out = 24;
+  *cols_out = 80;
+  if (ioctl(fd, TIOCGWINSZ, &winsize) == -1)
+    return;
+  if (winsize.ws_row > 0)
+    *rows_out = winsize.ws_row;
+  if (winsize.ws_col > 0)
+    *cols_out = winsize.ws_col;
 }
 
 static int32_t current_foreground_pgid(const struct ptyterm_session *session) {
@@ -531,6 +548,8 @@ static int spawn_session(struct ptyterm_daemon_state *state, uint32_t argc,
   int master_fd;
   pid_t child_pid;
   int session_id;
+  uint16_t rows;
+  uint16_t cols;
 
   if (state->session_count >= sizeof(state->sessions) / sizeof(state->sessions[0])) {
     errno = ENOSPC;
@@ -610,6 +629,16 @@ static int spawn_session(struct ptyterm_daemon_state *state, uint32_t argc,
     state->session_count -= 1;
     return -1;
   }
+  default_screen_size(master_fd, &rows, &cols);
+  if (ptyterm_screen_init(&session->screen, rows, cols) == -1) {
+    free(session->output_ring);
+    session->output_ring = NULL;
+    close(master_fd);
+    kill(child_pid, SIGTERM);
+    waitpid(child_pid, NULL, 0);
+    state->session_count -= 1;
+    return -1;
+  }
   snprintf(session->tty_name, sizeof(session->tty_name), "%s", slave_name);
   join_command(session->command, sizeof(session->command), argc, argv);
 
@@ -654,6 +683,7 @@ static void drain_session_output(struct ptyterm_session *session) {
   size = read(session->master_fd, buffer, sizeof(buffer));
   if (size > 0) {
     append_output(session, buffer, (size_t)size);
+    ptyterm_screen_feed(&session->screen, buffer, (size_t)size);
     if (session->client_fd >= 0) {
       if (append_pending_output(session, buffer, (size_t)size) == -1 ||
           flush_pending_data(session->client_fd, session->pending_output,
@@ -729,6 +759,7 @@ static void cleanup_state(struct ptyterm_daemon_state *state) {
     }
     free(state->sessions[i].output_ring);
     state->sessions[i].output_ring = NULL;
+    ptyterm_screen_free(&state->sessions[i].screen);
   }
 }
 
@@ -844,6 +875,65 @@ static int send_buffer_info_response(
   response.paused_on_full = session->paused_on_full;
   return ptyterm_send_message(client_fd, PTYTERM_MESSAGE_BUFFER_INFO_RESPONSE,
                               &response, sizeof(response));
+}
+
+static int send_screen_snapshot_response(
+    int client_fd, const struct ptyterm_daemon_state *state,
+    int requested_session_id, uint32_t screen_selector) {
+  const struct ptyterm_session *session;
+  struct ptyterm_screen_snapshot_response *response;
+  struct ptyterm_foreground_task_info foreground_task;
+  size_t payload_size;
+  size_t cell_count;
+  uint32_t selected_screen;
+  const char *cells;
+  int sent;
+
+  session = find_session(state, requested_session_id);
+  if (session == NULL) {
+    errno = ENOENT;
+    return -1;
+  }
+  if (screen_selector != PTYTERM_SCREEN_SELECTOR_ACTIVE &&
+      screen_selector != PTYTERM_SCREEN_SELECTOR_MAIN &&
+      screen_selector != PTYTERM_SCREEN_SELECTOR_ALT) {
+    errno = EINVAL;
+    return -1;
+  }
+
+  cell_count = (size_t)ptyterm_screen_rows(&session->screen) *
+               ptyterm_screen_cols(&session->screen);
+  payload_size = sizeof(*response) + cell_count;
+  response = calloc(1, payload_size);
+  if (response == NULL)
+    return -1;
+
+  resolve_foreground_task_info(session, &foreground_task);
+  cells = ptyterm_screen_cells(&session->screen, screen_selector,
+                               &selected_screen);
+  response->session_id = session->id;
+  response->selected_screen = selected_screen;
+  response->state = session->state;
+  response->shell_returned =
+      foreground_task.pgid > 0 && foreground_task.pgid == session->child_pid;
+  response->generation = ptyterm_screen_generation(&session->screen);
+  response->child_pid = session->child_pid;
+  response->fg_pgid = foreground_task.pgid;
+  response->rows = ptyterm_screen_rows(&session->screen);
+  response->cols = ptyterm_screen_cols(&session->screen);
+  response->cursor_row = ptyterm_screen_cursor_row(&session->screen,
+                                                   screen_selector, NULL);
+  response->cursor_col = ptyterm_screen_cursor_col(&session->screen,
+                                                   screen_selector, NULL);
+  response->cursor_visible =
+      (uint8_t)ptyterm_screen_cursor_visible(&session->screen);
+  snprintf(response->fg_task, sizeof(response->fg_task), "%s",
+           foreground_task.task_name);
+  memcpy(response + 1, cells, cell_count);
+  sent = ptyterm_send_message(client_fd, PTYTERM_MESSAGE_SCREEN_SNAPSHOT_RESPONSE,
+                              response, (uint32_t)payload_size);
+  free(response);
+  return sent;
 }
 
 static int send_send_response(int client_fd, struct ptyterm_session *session,
@@ -1116,6 +1206,21 @@ static int handle_daemon_shutdown_request(int client_fd, const void *payload,
   return 0;
 }
 
+static int handle_screen_snapshot_request(
+    int client_fd, struct ptyterm_daemon_state *state, const void *payload,
+    size_t payload_size) {
+  const struct ptyterm_screen_snapshot_request *request;
+
+  if (payload_size != sizeof(*request)) {
+    errno = EPROTO;
+    return -1;
+  }
+
+  request = (const struct ptyterm_screen_snapshot_request *)payload;
+  return send_screen_snapshot_response(client_fd, state, request->session_id,
+                                       request->screen_selector);
+}
+
 static int handle_create_request(int client_fd, struct ptyterm_daemon_state *state,
                                  const void *payload, size_t payload_size) {
   const struct ptyterm_create_request *request;
@@ -1280,6 +1385,18 @@ static int handle_client(int client_fd, struct ptyterm_daemon_state *state) {
     if (handle_daemon_shutdown_request(client_fd, payload,
                                        (size_t)payload_size) == -1) {
       send_error_response(client_fd, errno, strerror(errno));
+    }
+    return 0;
+  case PTYTERM_MESSAGE_SCREEN_SNAPSHOT_REQUEST:
+    if (handle_screen_snapshot_request(client_fd, state, payload,
+                                       (size_t)payload_size) == -1) {
+      if (errno == ENOENT) {
+        send_error_response(client_fd, errno, "session not found");
+      } else if (errno == EINVAL) {
+        send_error_response(client_fd, errno, "invalid screen selector");
+      } else {
+        send_error_response(client_fd, errno, strerror(errno));
+      }
     }
     return 0;
   default:

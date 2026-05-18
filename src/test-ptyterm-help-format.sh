@@ -49,6 +49,18 @@ printf '%s\n' "$out" | grep -q 'long: --recv-format' || {
   exit 1
 }
 
+printf '%s\n' "$out" | grep -q 'long: --snapshot' || {
+  echo "ptyterm --help-format=yaml: expected snapshot option entry" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q 'long: --screen' || {
+  echo "ptyterm --help-format=yaml: expected screen option entry" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
 printf '%s\n' "$out" | grep -q 'long: --escape' || {
   echo "ptyterm --help-format=yaml: expected escape option entry" >&2
   printf '%s\n' "$out" >&2
@@ -69,6 +81,12 @@ printf '%s\n' "$out" | grep -q 'description: Send input to one managed session' 
 
 printf '%s\n' "$out" | grep -q "command: \".*--session=1 --recv\"" || {
   echo "ptyterm --help-format=yaml: expected recv example command" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q "command: \".*--session=1 --snapshot\"" || {
+  echo "ptyterm --help-format=yaml: expected snapshot example command" >&2
   printf '%s\n' "$out" >&2
   exit 1
 }

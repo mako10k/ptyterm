@@ -35,6 +35,8 @@ enum ptyterm_message_type {
   PTYTERM_MESSAGE_DAEMON_STATUS_RESPONSE = 19,
   PTYTERM_MESSAGE_DAEMON_SHUTDOWN_REQUEST = 20,
   PTYTERM_MESSAGE_DAEMON_SHUTDOWN_RESPONSE = 21,
+  PTYTERM_MESSAGE_SCREEN_SNAPSHOT_REQUEST = 22,
+  PTYTERM_MESSAGE_SCREEN_SNAPSHOT_RESPONSE = 23,
 };
 
 enum ptyterm_session_state {
@@ -45,6 +47,12 @@ enum ptyterm_session_state {
 
 enum ptyterm_recv_flags {
   PTYTERM_RECV_FLAG_PEEK = 1u << 0,
+};
+
+enum ptyterm_screen_selector {
+  PTYTERM_SCREEN_SELECTOR_ACTIVE = 1,
+  PTYTERM_SCREEN_SELECTOR_MAIN = 2,
+  PTYTERM_SCREEN_SELECTOR_ALT = 3,
 };
 
 struct ptyterm_message_header {
@@ -168,6 +176,28 @@ struct ptyterm_daemon_shutdown_response {
   int32_t daemon_pid;
 };
 
+struct ptyterm_screen_snapshot_request {
+  int32_t session_id;
+  uint32_t screen_selector;
+};
+
+struct ptyterm_screen_snapshot_response {
+  uint32_t session_id;
+  uint32_t selected_screen;
+  uint32_t state;
+  uint32_t shell_returned;
+  uint64_t generation;
+  int32_t child_pid;
+  int32_t fg_pgid;
+  uint16_t rows;
+  uint16_t cols;
+  uint16_t cursor_row;
+  uint16_t cursor_col;
+  uint8_t cursor_visible;
+  uint8_t reserved[3];
+  char fg_task[PTYTERM_TASK_NAME_MAX];
+};
+
 struct ptyterm_error_response {
   int32_t error_code;
   char message[PTYTERM_ERROR_MESSAGE_MAX];
@@ -180,6 +210,9 @@ int ptyterm_send_message(int fd, uint16_t type, const void *payload,
                          uint32_t payload_size);
 ssize_t ptyterm_recv_message(int fd, struct ptyterm_message_header *header,
                              void *payload, size_t payload_capacity);
+ssize_t ptyterm_recv_message_alloc(int fd, struct ptyterm_message_header *header,
+                                   void **payload_out);
 const char *ptyterm_session_state_name(uint32_t state);
+const char *ptyterm_screen_selector_name(uint32_t selector);
 
 #endif
