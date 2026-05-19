@@ -902,6 +902,164 @@ That deferred transport could carry:
 
 But none of that should be specified until the simpler composition has been tested.
 
+#### Rendering into another terminal
+
+The renderer is explicitly meant to paint the daemon-owned terminal state into a
+different terminal than the one that originally hosted the PTY session.
+
+That means the rendering pipeline should be modeled as:
+
+1. the daemon owns canonical terminal state
+2. the client fetches or subscribes to that state
+3. the client renders that state into its own local terminal
+
+This is intentionally tmux-like in outcome, but not in implementation shape.
+
+- The daemon remains the source of truth for terminal state.
+- The client owns repaint policy for the target terminal.
+- The target terminal is treated as a presentation surface, not as the primary state store.
+
+That distinction matters because it preserves one canonical screen model even if multiple terminals inspect the same session over time.
+
+#### Full redraw versus diff redraw
+
+The canonical object should remain the full snapshot.
+
+- Full snapshot is the correctness baseline.
+- Diff rendering is a derived optimization.
+- Partial transport is a later optimization on top of snapshot generations.
+
+This leads to three distinct layers that should not be conflated.
+
+1. Canonical state layer: full terminal snapshot.
+2. Local repaint layer: compare prior rendered snapshot against current snapshot and emit the minimal terminal writes needed for the target terminal.
+3. Transport optimization layer: optionally avoid re-sending unchanged snapshot regions over the wire.
+
+The project should implement them in that order.
+
+#### Client-side diff rendering as the first optimization
+
+The first renderer that paints into another terminal should use client-side diff rendering before any server-side delta transport is introduced.
+
+Recommended algorithm:
+
+1. Fetch snapshot generation N.
+2. Compare it against the last snapshot generation rendered by this client.
+3. Compute dirty rows or dirty rectangular spans locally.
+4. Emit cursor movement, erase, and text writes only for the changed regions.
+5. Update the client's shadow copy of the rendered terminal.
+
+Why this comes first:
+
+- It preserves one simple server contract: return a snapshot.
+- It allows partial repaint on the target terminal immediately.
+- It avoids coupling wire format design to premature assumptions about change encoding.
+
+The client therefore needs its own shadow state:
+
+- last rendered snapshot generation
+- last rendered cells
+- last rendered cursor state
+- current local terminal size
+- viewport origin when the target terminal is smaller than the remote screen
+
+This shadow state belongs to the renderer client, not the daemon.
+
+#### Partial repaint policy on the target terminal
+
+Partial repaint should be defined in terms of visible regions of the target terminal.
+
+Recommended policy:
+
+- If only a few rows changed, repaint only those rows.
+- If one row changed in a narrow span, repaint only that span.
+- If the viewport origin changed, repaint the whole visible viewport.
+- If local terminal size changed, repaint the whole visible viewport.
+- If the selected screen identity changed, repaint the whole visible viewport.
+- If too many rows or spans changed, fall back to a full viewport redraw rather than chasing micro-optimizations.
+
+This keeps redraw logic bounded and predictable.
+
+#### Suggested diff granularity
+
+The initial diff granularity should be row-based, with optional span coalescing inside a row.
+
+Recommended order:
+
+- v1 diff rendering: row dirty check
+- v2 diff rendering: row span dirty check
+- later only if justified: cell-level patch streams or semantic edit operations
+
+Why row-first:
+
+- It is simple to validate.
+- It matches the rectangular nature of the snapshot model.
+- It keeps the renderer logic understandable without depending on terminal-edit scripts.
+
+Example decision rule:
+
+- if row content differs, mark the row dirty
+- if dirty rows are sparse, repaint each dirty row independently
+- if dirty rows are dense, repaint the whole viewport
+
+That is usually enough to get most of the benefit without making correctness fragile.
+
+#### Cursor and attribute-aware repaint considerations
+
+Once attributes exist in the cell model, diff rendering must compare more than glyph bytes.
+
+Changed means any of the following changed in a visible cell:
+
+- glyph content
+- width semantics
+- color or style attributes
+- cursor overlap implications for the row
+
+Until the attribute model lands, current renderer implementations can treat the visible text grid and cursor state as the only repaint inputs. After that point, diff rendering must compare full cell state rather than just text bytes.
+
+#### Partial transport as a later server-side optimization
+
+Only after snapshot-based rendering and client-side diff repaint are proven should the daemon learn a partial-update transport.
+
+If later needed, the transport should still be defined as snapshot-derived rather than event-log-derived.
+
+Good candidates:
+
+- dirty-row summaries since generation N
+- rectangular cell patches since generation N
+- full snapshot fallback when generation continuity cannot be preserved
+
+Poor first choices:
+
+- raw terminal event replay as the primary contract
+- escape-sequence replay as the network protocol
+- patch formats that cannot recover cleanly to a full snapshot baseline
+
+The client must always be able to say: “I lost sync; send me a full snapshot again.”
+
+#### Suggested staged plan for another-terminal rendering
+
+The least risky order is:
+
+1. Full snapshot fetch plus full viewport repaint.
+2. Full snapshot fetch plus client-side row-diff repaint.
+3. Full snapshot fetch plus client-side span-diff repaint.
+4. Optional snapshot watch or generation notification channel.
+5. Optional server-side partial snapshot transport.
+
+This order gives useful tmux-like redraw behavior early without committing the daemon to a complicated patch protocol too soon.
+
+#### Failure recovery model
+
+Diff rendering and partial rendering must always preserve a simple recovery path.
+
+- If the renderer misses generations, request a full snapshot.
+- If the client shadow state is lost or ambiguous, request a full snapshot.
+- If local terminal corruption is suspected, repaint the whole viewport.
+- If the selected screen changes unexpectedly, repaint the whole viewport.
+
+In other words, partial rendering is an optimization, not a correctness dependency.
+
 #### Mode separation
 
 The interactive renderer will need at least two internal concepts even if the CLI only exposes one mode.
