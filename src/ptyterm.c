@@ -50,6 +50,7 @@ static int connect_daemon_socket(const char *socket_path,
                                  char *default_socket_path,
                                  int auto_start);
 static void save_termios(int fd);
+static void restore_termios(int fd);
 static void restore_termios_handler(void);
 static void attach_size_changed(int sig);
 static int parse_status_format(const char *value);
@@ -58,6 +59,8 @@ static int parse_screen_selector(const char *value);
 static int parse_wait_predicate(const char *value);
 static int parse_duration_ms(const char *value, uint64_t *duration_ms_out);
 static int monotonic_time_ms(uint64_t *time_ms_out);
+static int run_view_client(const char *socket_path, int session_id,
+                           uint32_t screen_selector);
 static void print_help(FILE *out, const char *program_name, int help_format);
 static int usage_error(const char *program_name, const char *fmt, ...);
 static void print_create_status(const struct ptyterm_create_response *response,
@@ -265,6 +268,7 @@ static void print_management_examples(FILE *out, const char *program_name) {
   fprintf(out, "  %s --session=1 --send='echo hello\\n'\n", program_name);
   fprintf(out, "  %s --session=1 --recv\n", program_name);
   fprintf(out, "  %s --session=1 --snapshot\n", program_name);
+  fprintf(out, "  %s --session=1 --view\n", program_name);
   fprintf(out, "  %s --session=1 --wait-state=snapshot-changed --wait-timeout=2s\n",
           program_name);
   fprintf(out, "  %s --help\n", program_name);
@@ -301,6 +305,7 @@ static void print_text_help(FILE *out, const char *program_name) {
   fprintf(out, "      --send=DATA     : send decoded bytes to one session\n");
   fprintf(out, "      --recv          : receive buffered output from one session\n");
   fprintf(out, "      --snapshot      : show a readable terminal snapshot for one session\n");
+  fprintf(out, "      --view          : open a scrollable full-screen terminal snapshot viewer\n");
   fprintf(out, "      --wait-state=PREDICATE : wait for a state predicate and print the resolving snapshot\n");
   fprintf(out, "      --wait-timeout=DURATION : maximum wait time for --wait-state (ms|s)\n");
   fprintf(out, "      --screen=active|main|alt : select which screen snapshot to inspect (default: active)\n");
@@ -436,6 +441,11 @@ static void print_yaml_help(FILE *out, const char *program_name) {
   fprintf(out, "      argument: none\n");
   fprintf(out, "      requires: [--session]\n");
   fprintf(out, "      description: Show a readable terminal snapshot for one session.\n");
+  fprintf(out, "    - long: --view\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      requires: [--session]\n");
+  fprintf(out, "      description: Open a scrollable full-screen terminal snapshot viewer.\n");
   fprintf(out, "    - long: --wait-state\n");
   fprintf(out, "      short: null\n");
   fprintf(out, "      argument: snapshot-changed|foreground-changed|shell-returned|session-exited|cursor-changed\n");
@@ -450,7 +460,7 @@ static void print_yaml_help(FILE *out, const char *program_name) {
   fprintf(out, "      short: null\n");
   fprintf(out, "      argument: active|main|alt\n");
   fprintf(out, "      default: active\n");
-  fprintf(out, "      requires: [--snapshot|--wait-state]\n");
+  fprintf(out, "      requires: [--snapshot|--view|--wait-state]\n");
   fprintf(out, "      description: Select which terminal screen snapshot to inspect.\n");
   fprintf(out, "    - long: --recv-format\n");
   fprintf(out, "      short: null\n");
@@ -513,6 +523,8 @@ static void print_yaml_help(FILE *out, const char *program_name) {
     fprintf(out, "    command: \"%s --session=1 --recv\"\n", program_name);
     fprintf(out, "  - description: Show a terminal snapshot for one managed session\n");
     fprintf(out, "    command: \"%s --session=1 --snapshot\"\n", program_name);
+    fprintf(out, "  - description: Open a terminal snapshot viewer for one managed session\n");
+    fprintf(out, "    command: \"%s --session=1 --view\"\n", program_name);
         fprintf(out, "  - description: Wait for a terminal state change and print the resolving snapshot\n");
         fprintf(out, "    command: \"%s --session=1 --wait-state=snapshot-changed --wait-timeout=2s\"\n",
           program_name);
@@ -1165,6 +1177,301 @@ static int run_snapshot_client(const char *socket_path, int session_id,
 
   result = print_snapshot_output(&response, cells, status_format);
   free(cells);
+  return result;
+}
+
+static int write_all_fd(int fd, const char *buffer, size_t size) {
+  size_t offset;
+
+  offset = 0;
+  while (offset < size) {
+    ssize_t written;
+
+    written = write(fd, buffer + offset, size - offset);
+    if (written == -1) {
+      if (errno == EINTR)
+        continue;
+      return -1;
+    }
+    offset += (size_t)written;
+  }
+  return 0;
+}
+
+static void read_view_winsize(int fd, uint16_t *rows_out, uint16_t *cols_out) {
+  struct winsize winsize;
+
+  *rows_out = 24;
+  *cols_out = 80;
+  if (ioctl(fd, TIOCGWINSZ, &winsize) == -1)
+    return;
+  if (winsize.ws_row > 0)
+    *rows_out = winsize.ws_row;
+  if (winsize.ws_col > 0)
+    *cols_out = winsize.ws_col;
+}
+
+static uint16_t clamp_view_offset(uint16_t offset, uint16_t visible,
+                                  uint16_t total) {
+  uint16_t max_offset;
+
+  max_offset = total > visible ? (uint16_t)(total - visible) : 0;
+  return offset > max_offset ? max_offset : offset;
+}
+
+static int write_view_line(int fd, uint16_t row, const char *data,
+                           size_t data_size, uint16_t cols) {
+  char prefix[32];
+  size_t used;
+
+  used = (size_t)snprintf(prefix, sizeof(prefix), "\033[%u;1H",
+                          (unsigned int)row);
+  if (used >= sizeof(prefix) || write_all_fd(fd, prefix, used) == -1)
+    return -1;
+
+  if (data_size > cols)
+    data_size = cols;
+  if (data_size > 0 && write_all_fd(fd, data, data_size) == -1)
+    return -1;
+  while (data_size < cols) {
+    char spaces[64];
+    size_t chunk;
+
+    memset(spaces, ' ', sizeof(spaces));
+    chunk = (size_t)(cols - data_size);
+    if (chunk > sizeof(spaces))
+      chunk = sizeof(spaces);
+    if (write_all_fd(fd, spaces, chunk) == -1)
+      return -1;
+    data_size += chunk;
+  }
+  return 0;
+}
+
+static int draw_view_snapshot(
+    int fd, int session_id, const struct ptyterm_screen_snapshot_response *response,
+    const char *cells, uint16_t local_rows, uint16_t local_cols,
+    uint16_t viewport_row, uint16_t viewport_col) {
+  char status[256];
+  const char *fg_task;
+  uint16_t visible_rows;
+  uint16_t row;
+
+  fg_task = response->fg_task[0] != '\0' ? response->fg_task : "-";
+  visible_rows = local_rows > 1 ? (uint16_t)(local_rows - 1) : 1;
+  if (write_all_fd(fd, "\033[?1049h\033[?25l\033[2J", 18) == -1)
+    return -1;
+  snprintf(status, sizeof(status),
+           "view session=%u screen=%s remote=%ux%u viewport=%u,%u fg=%s gen=%llu Ctrl+C exit",
+           (unsigned int)session_id,
+           ptyterm_screen_selector_name(response->selected_screen),
+           (unsigned int)response->rows, (unsigned int)response->cols,
+           (unsigned int)viewport_row + 1, (unsigned int)viewport_col + 1,
+           fg_task, (unsigned long long)response->generation);
+  if (write_view_line(fd, 1, status, strlen(status), local_cols) == -1)
+    return -1;
+
+  for (row = 0; row < visible_rows; ++row) {
+    uint16_t source_row;
+    size_t line_size;
+    const char *line;
+
+    source_row = (uint16_t)(viewport_row + row);
+    if (source_row >= response->rows) {
+      if (write_view_line(fd, (uint16_t)(row + 2), "", 0, local_cols) == -1)
+        return -1;
+      continue;
+    }
+    line = cells + (size_t)source_row * response->cols + viewport_col;
+    line_size = response->cols > viewport_col ?
+                    (size_t)(response->cols - viewport_col) : 0;
+    if (write_view_line(fd, (uint16_t)(row + 2), line, line_size,
+                        local_cols) == -1) {
+      return -1;
+    }
+  }
+
+  return write_all_fd(fd, "\033[H", 3);
+}
+
+static int run_view_client(const char *socket_path, int session_id,
+                           uint32_t screen_selector) {
+  struct ptyterm_screen_snapshot_response response;
+  struct termios termios;
+  char *cells;
+  uint16_t local_rows;
+  uint16_t local_cols;
+  uint16_t previous_rows;
+  uint16_t previous_cols;
+  uint16_t viewport_row;
+  uint16_t viewport_col;
+  uint64_t active_generation;
+  int parser_state;
+  int result;
+
+  if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+    fprintf(stderr, "--view requires a terminal on stdin and stdout\n");
+    return EXIT_FAILURE;
+  }
+
+  if (request_screen_snapshot_client(socket_path, session_id, screen_selector,
+                                     &response, &cells) != EXIT_SUCCESS) {
+    return EXIT_FAILURE;
+  }
+
+  save_termios(STDIN_FILENO);
+  termios = saved_termios;
+  termios.c_lflag &= ~ICANON & ~ECHO & ~ISIG & ~IEXTEN;
+  termios.c_iflag &= ~BRKINT & ~ICRNL & ~INPCK & ~ISTRIP & ~IXON;
+  termios.c_cflag &= ~CSIZE & ~PARENB;
+  termios.c_cflag |= CS8;
+  termios.c_cc[VMIN] = 0;
+  termios.c_cc[VTIME] = 0;
+  if (ioctl(STDIN_FILENO, TCSETSF, &termios) == -1) {
+    perror("ioctl(TCSETSF)");
+    free(cells);
+    return EXIT_FAILURE;
+  }
+  g_ifd = STDIN_FILENO;
+  atexit(restore_termios_handler);
+
+  viewport_row = 0;
+  viewport_col = 0;
+  parser_state = 0;
+  active_generation = response.generation;
+  read_view_winsize(STDOUT_FILENO, &local_rows, &local_cols);
+  previous_rows = local_rows;
+  previous_cols = local_cols;
+  viewport_row = clamp_view_offset(viewport_row,
+                                   local_rows > 1 ? (uint16_t)(local_rows - 1)
+                                                  : 1,
+                                   response.rows);
+  viewport_col = clamp_view_offset(viewport_col, local_cols, response.cols);
+  if (draw_view_snapshot(STDOUT_FILENO, session_id, &response, cells, local_rows,
+                         local_cols, viewport_row, viewport_col) == -1) {
+    perror("write");
+    free(cells);
+    return EXIT_FAILURE;
+  }
+
+  result = EXIT_SUCCESS;
+  for (;;) {
+    fd_set rfds;
+    struct timeval timeout;
+    int ready;
+    int needs_redraw;
+
+    FD_ZERO(&rfds);
+    FD_SET(STDIN_FILENO, &rfds);
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 100000;
+    ready = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &timeout);
+    if (ready == -1) {
+      if (errno == EINTR)
+        continue;
+      perror("select");
+      result = EXIT_FAILURE;
+      break;
+    }
+
+    needs_redraw = 0;
+    if (ready > 0 && FD_ISSET(STDIN_FILENO, &rfds)) {
+      char input[32];
+      ssize_t input_size;
+      ssize_t i;
+
+      input_size = read(STDIN_FILENO, input, sizeof(input));
+      if (input_size == -1) {
+        if (errno != EINTR) {
+          perror("read");
+          result = EXIT_FAILURE;
+          break;
+        }
+      } else {
+        for (i = 0; i < input_size; ++i) {
+          unsigned char byte;
+
+          byte = (unsigned char)input[i];
+          if (parser_state == 0) {
+            if (byte == 0x03)
+              goto done;
+            if (byte == 0x1b) {
+              parser_state = 1;
+              continue;
+            }
+            continue;
+          }
+          if (parser_state == 1) {
+            parser_state = byte == '[' ? 2 : 0;
+            continue;
+          }
+
+          parser_state = 0;
+          if (byte == 'A' && viewport_row > 0) {
+            viewport_row -= 1;
+            needs_redraw = 1;
+          } else if (byte == 'B') {
+            uint16_t visible_rows;
+
+            visible_rows = local_rows > 1 ? (uint16_t)(local_rows - 1) : 1;
+            if (viewport_row < clamp_view_offset(UINT16_MAX, visible_rows,
+                                                 response.rows)) {
+              viewport_row += 1;
+              needs_redraw = 1;
+            }
+          } else if (byte == 'C') {
+            if (viewport_col < clamp_view_offset(UINT16_MAX, local_cols,
+                                                 response.cols)) {
+              viewport_col += 1;
+              needs_redraw = 1;
+            }
+          } else if (byte == 'D' && viewport_col > 0) {
+            viewport_col -= 1;
+            needs_redraw = 1;
+          }
+        }
+      }
+    }
+
+    read_view_winsize(STDOUT_FILENO, &local_rows, &local_cols);
+    if (local_rows != previous_rows || local_cols != previous_cols) {
+      previous_rows = local_rows;
+      previous_cols = local_cols;
+      needs_redraw = 1;
+    }
+
+    free(cells);
+    if (request_screen_snapshot_client(socket_path, session_id, screen_selector,
+                                       &response, &cells) != EXIT_SUCCESS) {
+      result = EXIT_FAILURE;
+      break;
+    }
+    if (response.generation != active_generation)
+      needs_redraw = 1;
+    active_generation = response.generation;
+
+    viewport_row = clamp_view_offset(viewport_row,
+                                     local_rows > 1 ? (uint16_t)(local_rows - 1)
+                                                    : 1,
+                                     response.rows);
+    viewport_col = clamp_view_offset(viewport_col, local_cols, response.cols);
+    if (needs_redraw &&
+        draw_view_snapshot(STDOUT_FILENO, session_id, &response, cells,
+                           local_rows, local_cols, viewport_row,
+                           viewport_col) == -1) {
+      perror("write");
+      result = EXIT_FAILURE;
+      break;
+    }
+  }
+
+done:
+  free(cells);
+  if (write_all_fd(STDOUT_FILENO, "\033[?25h\033[?1049l", 14) == -1)
+    result = EXIT_FAILURE;
+  if (isatty(STDIN_FILENO))
+    restore_termios(STDIN_FILENO);
+  g_ifd = -1;
   return result;
 }
 
@@ -2400,7 +2707,10 @@ static void restore_termios(int fd) {
 }
 
 /// @brief プログラム終了時のコールバック関数
-static void restore_termios_handler() { restore_termios(g_ifd); }
+static void restore_termios_handler() {
+  if (g_ifd >= 0)
+    restore_termios(g_ifd);
+}
 
 /// @brief スレーブ端末名
 static char *slave_name = NULL;
@@ -2552,6 +2862,7 @@ int main(int argc, char *const argv[]) {
   int help_format = PTYTERM_HELP_FORMAT_TEXT;
   int list_requested = 0;
   int snapshot_requested = 0;
+  int view_requested = 0;
   int wait_predicate = PTYTERM_WAIT_PREDICATE_NONE;
   int recv_peek = 0;
   int recv_format = PTYTERM_RECV_FORMAT_AUTO;
@@ -2589,6 +2900,7 @@ int main(int argc, char *const argv[]) {
       OPT_RECV_UNTIL,
       OPT_PEEK,
       OPT_SNAPSHOT,
+      OPT_VIEW,
       OPT_WAIT_STATE,
       OPT_WAIT_TIMEOUT,
       OPT_SCREEN,
@@ -2621,6 +2933,7 @@ int main(int argc, char *const argv[]) {
                        {"recv-until", required_argument, NULL, OPT_RECV_UNTIL},
                        {"peek", no_argument, NULL, OPT_PEEK},
                        {"snapshot", no_argument, NULL, OPT_SNAPSHOT},
+                       {"view", no_argument, NULL, OPT_VIEW},
                        {"wait-state", required_argument, NULL, OPT_WAIT_STATE},
                        {"wait-timeout", required_argument, NULL, OPT_WAIT_TIMEOUT},
                        {"screen", required_argument, NULL, OPT_SCREEN},
@@ -2710,6 +3023,9 @@ int main(int argc, char *const argv[]) {
     case OPT_SNAPSHOT:
       snapshot_requested = 1;
       break;
+    case OPT_VIEW:
+      view_requested = 1;
+      break;
     case OPT_WAIT_STATE:
       wait_predicate = parse_wait_predicate(optarg);
       if (wait_predicate < 0)
@@ -2794,8 +3110,9 @@ int main(int argc, char *const argv[]) {
   if (recv_peek && !recv_requested)
     return usage_error(argv[0], "--peek requires --recv");
   if (screen_selector != PTYTERM_SCREEN_SELECTOR_ACTIVE &&
-      !snapshot_requested && wait_predicate == PTYTERM_WAIT_PREDICATE_NONE)
-    return usage_error(argv[0], "--screen requires --snapshot or --wait-state");
+      !snapshot_requested && !view_requested &&
+      wait_predicate == PTYTERM_WAIT_PREDICATE_NONE)
+    return usage_error(argv[0], "--screen requires --snapshot, --view, or --wait-state");
   if (wait_predicate != PTYTERM_WAIT_PREDICATE_NONE && wait_timeout_ms == 0)
     return usage_error(argv[0], "--wait-state requires --wait-timeout=DURATION");
   if (wait_timeout_ms != 0 && wait_predicate == PTYTERM_WAIT_PREDICATE_NONE)
@@ -2820,6 +3137,7 @@ int main(int argc, char *const argv[]) {
       (resize_requested != 0) +
         (buffer_info_requested != 0) + (recv_requested != 0) +
         (snapshot_requested != 0) +
+        (view_requested != 0) +
         (wait_predicate != PTYTERM_WAIT_PREDICATE_NONE) +
           (send_data != NULL) >
       1) {
@@ -2831,6 +3149,7 @@ int main(int argc, char *const argv[]) {
        (detach_requested != 0) + (list_requested != 0) +
       (resize_requested != 0) + (buffer_info_requested != 0) +
       (recv_requested != 0) + (snapshot_requested != 0) +
+      (view_requested != 0) +
       (wait_predicate != PTYTERM_WAIT_PREDICATE_NONE) +
       (send_data != NULL) +
        (filter_mode != PTYTERM_FILTER_MODE_NONE)) > 1) {
@@ -2858,7 +3177,7 @@ int main(int argc, char *const argv[]) {
       daemon_stop_requested || detach_requested ||
       resize_requested ||
       list_requested || buffer_info_requested ||
-      recv_requested || snapshot_requested ||
+      recv_requested || snapshot_requested || view_requested ||
       wait_predicate != PTYTERM_WAIT_PREDICATE_NONE || send_data != NULL) {
     if ((ifile || ofile || afile ||
          ((opt_cols > 0 || opt_lines > 0) && !resize_requested)) &&
@@ -2908,6 +3227,9 @@ int main(int argc, char *const argv[]) {
                                  (uint32_t)screen_selector,
                                  status_format_explicit ? status_format
                                                         : PTYTERM_STATUS_FORMAT_TEXT);
+    if (view_requested)
+      return run_view_client(socket_path, session_id,
+                             (uint32_t)screen_selector);
     if (wait_predicate != PTYTERM_WAIT_PREDICATE_NONE)
       return run_wait_state_client(socket_path, session_id,
                                    (uint32_t)screen_selector, wait_predicate,

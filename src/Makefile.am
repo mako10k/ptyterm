@@ -27,6 +27,7 @@ TESTS = \
 	test-ptyterm-create.sh \
 	test-ptyterm-list.sh \
 	test-ptyterm-snapshot.sh \
+	test-ptyterm-view.sh \
 	test-ptyterm-wait-state.sh \
 	test-ptyterm-resize.sh \
 	test-ptyterm-send-recv.sh \

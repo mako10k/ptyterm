@@ -962,6 +962,78 @@ In practice, that means the first interactive renderer can reuse an existing beh
 - on local `SIGWINCH`, send updated rows and columns again
 - under `preserve-remote`, skip those resize requests and keep the renderer purely local in how it adapts
 
+### Interactive renderer pseudocode sketch
+
+The first interactive renderer does not need a new daemon ownership model.
+
+- It attaches as the single controlling client.
+- It paints from snapshots.
+- It forwards input bytes intentionally.
+- It applies resize policy only when the selected mode requires it.
+
+Illustrative pseudocode:
+
+```text
+run_attach_rendered(session_id, resize_mode, screen_selector):
+  local_term = enter_local_renderer_mode()
+  viewport = viewport_origin(0, 0)
+  baseline = request_snapshot(session_id, screen_selector)
+  active_generation = baseline.generation
+
+  attach_session(session_id)
+
+  if resize_mode == follow_local:
+    rows, cols = read_local_winsize()
+    send_resize(session_id, rows, cols)
+    baseline = request_snapshot(session_id, screen_selector)
+    active_generation = baseline.generation
+
+  draw_snapshot(local_term, baseline, viewport)
+
+  while true:
+    events = wait_for_local_input_or_refresh_tick_or_sigwinch()
+
+    if events.contains(ctrl_c):
+      break
+
+    if events.contains(sigwinch):
+      rows, cols = read_local_winsize()
+
+      if resize_mode == follow_local:
+        send_resize(session_id, rows, cols)
+      else:
+        viewport = clamp_viewport_for_local_size(viewport, rows, cols,
+                             baseline.rows,
+                             baseline.cols)
+
+    if events.contains(key_input):
+      bytes = decode_local_keys_to_session_input(events.key_input)
+      if bytes.not_empty():
+        send_input(session_id, bytes)
+
+    current = request_snapshot(session_id, screen_selector)
+
+    if current.generation != active_generation or events.requires_redraw():
+      viewport = clamp_viewport_for_current_state(viewport,
+                            local_term.size,
+                            current.rows,
+                            current.cols)
+      draw_snapshot(local_term, current, viewport)
+      active_generation = current.generation
+
+    if current.state == exited and local_user_requested_exit_policy():
+      break
+
+  restore_local_renderer_mode(local_term)
+```
+
+Important control-flow properties:
+
+- The resize policy is a narrow branch inside one renderer loop, not a separate subsystem.
+- `follow-local` changes remote PTY geometry; `preserve-remote` changes only local clipping and viewport behavior.
+- Snapshot redraw remains the canonical source of truth after every input or resize step.
+- Local terminal restoration is unconditional on every exit path.
+
 This keeps the sequencing simple.
 
 - Milestone A: useful read-only viewer
