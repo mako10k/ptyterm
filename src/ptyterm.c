@@ -55,6 +55,7 @@ static void attach_size_changed(int sig);
 static int parse_status_format(const char *value);
 static int parse_help_format(const char *value);
 static int parse_screen_selector(const char *value);
+static int parse_wait_predicate(const char *value);
 static int parse_duration_ms(const char *value, uint64_t *duration_ms_out);
 static int monotonic_time_ms(uint64_t *time_ms_out);
 static void print_help(FILE *out, const char *program_name, int help_format);
@@ -95,6 +96,15 @@ enum ptyterm_filter_mode {
   PTYTERM_FILTER_MODE_NONE = 0,
   PTYTERM_FILTER_MODE_ESCAPE,
   PTYTERM_FILTER_MODE_UNESCAPE,
+};
+
+enum ptyterm_wait_predicate {
+  PTYTERM_WAIT_PREDICATE_NONE = 0,
+  PTYTERM_WAIT_PREDICATE_SNAPSHOT_CHANGED,
+  PTYTERM_WAIT_PREDICATE_FOREGROUND_CHANGED,
+  PTYTERM_WAIT_PREDICATE_SHELL_RETURNED,
+  PTYTERM_WAIT_PREDICATE_SESSION_EXITED,
+  PTYTERM_WAIT_PREDICATE_CURSOR_CHANGED,
 };
 
 static int set_nonblocking(int fd) {
@@ -148,6 +158,37 @@ static int parse_screen_selector(const char *value) {
   if (strcmp(value, "alt") == 0)
     return PTYTERM_SCREEN_SELECTOR_ALT;
   return -1;
+}
+
+static int parse_wait_predicate(const char *value) {
+  if (strcmp(value, "snapshot-changed") == 0)
+    return PTYTERM_WAIT_PREDICATE_SNAPSHOT_CHANGED;
+  if (strcmp(value, "foreground-changed") == 0)
+    return PTYTERM_WAIT_PREDICATE_FOREGROUND_CHANGED;
+  if (strcmp(value, "shell-returned") == 0)
+    return PTYTERM_WAIT_PREDICATE_SHELL_RETURNED;
+  if (strcmp(value, "session-exited") == 0)
+    return PTYTERM_WAIT_PREDICATE_SESSION_EXITED;
+  if (strcmp(value, "cursor-changed") == 0)
+    return PTYTERM_WAIT_PREDICATE_CURSOR_CHANGED;
+  return -1;
+}
+
+static const char *wait_predicate_name(int predicate) {
+  switch (predicate) {
+  case PTYTERM_WAIT_PREDICATE_SNAPSHOT_CHANGED:
+    return "snapshot_changed";
+  case PTYTERM_WAIT_PREDICATE_FOREGROUND_CHANGED:
+    return "foreground_changed";
+  case PTYTERM_WAIT_PREDICATE_SHELL_RETURNED:
+    return "shell_returned";
+  case PTYTERM_WAIT_PREDICATE_SESSION_EXITED:
+    return "session_exited";
+  case PTYTERM_WAIT_PREDICATE_CURSOR_CHANGED:
+    return "cursor_changed";
+  default:
+    return "unknown";
+  }
 }
 
 static int parse_duration_ms(const char *value, uint64_t *duration_ms_out) {
@@ -224,6 +265,8 @@ static void print_management_examples(FILE *out, const char *program_name) {
   fprintf(out, "  %s --session=1 --send='echo hello\\n'\n", program_name);
   fprintf(out, "  %s --session=1 --recv\n", program_name);
   fprintf(out, "  %s --session=1 --snapshot\n", program_name);
+  fprintf(out, "  %s --session=1 --wait-state=snapshot-changed --wait-timeout=2s\n",
+          program_name);
   fprintf(out, "  %s --help\n", program_name);
   fprintf(out, "\n");
 }
@@ -258,6 +301,8 @@ static void print_text_help(FILE *out, const char *program_name) {
   fprintf(out, "      --send=DATA     : send decoded bytes to one session\n");
   fprintf(out, "      --recv          : receive buffered output from one session\n");
   fprintf(out, "      --snapshot      : show a readable terminal snapshot for one session\n");
+  fprintf(out, "      --wait-state=PREDICATE : wait for a state predicate and print the resolving snapshot\n");
+  fprintf(out, "      --wait-timeout=DURATION : maximum wait time for --wait-state (ms|s)\n");
   fprintf(out, "      --screen=active|main|alt : select which screen snapshot to inspect (default: active)\n");
   fprintf(out, "      --recv-format=raw|escaped : select recv payload rendering (default: escaped on TTY stdout, raw otherwise)\n");
   fprintf(out, "      --recv-control=without|with : drop control characters from recv payload unless explicitly kept\n");
@@ -391,11 +436,21 @@ static void print_yaml_help(FILE *out, const char *program_name) {
   fprintf(out, "      argument: none\n");
   fprintf(out, "      requires: [--session]\n");
   fprintf(out, "      description: Show a readable terminal snapshot for one session.\n");
+  fprintf(out, "    - long: --wait-state\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: snapshot-changed|foreground-changed|shell-returned|session-exited|cursor-changed\n");
+  fprintf(out, "      requires: [--session, --wait-timeout]\n");
+  fprintf(out, "      description: Wait for the requested state predicate and print the resolving snapshot.\n");
+  fprintf(out, "    - long: --wait-timeout\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: DURATION\n");
+  fprintf(out, "      requires: [--wait-state]\n");
+  fprintf(out, "      description: Maximum wait time for the state predicate.\n");
   fprintf(out, "    - long: --screen\n");
   fprintf(out, "      short: null\n");
   fprintf(out, "      argument: active|main|alt\n");
   fprintf(out, "      default: active\n");
-  fprintf(out, "      requires: [--snapshot]\n");
+  fprintf(out, "      requires: [--snapshot|--wait-state]\n");
   fprintf(out, "      description: Select which terminal screen snapshot to inspect.\n");
   fprintf(out, "    - long: --recv-format\n");
   fprintf(out, "      short: null\n");
@@ -458,6 +513,9 @@ static void print_yaml_help(FILE *out, const char *program_name) {
     fprintf(out, "    command: \"%s --session=1 --recv\"\n", program_name);
     fprintf(out, "  - description: Show a terminal snapshot for one managed session\n");
     fprintf(out, "    command: \"%s --session=1 --snapshot\"\n", program_name);
+        fprintf(out, "  - description: Wait for a terminal state change and print the resolving snapshot\n");
+        fprintf(out, "    command: \"%s --session=1 --wait-state=snapshot-changed --wait-timeout=2s\"\n",
+          program_name);
   fprintf(out, "notes:\n");
   fprintf(out, "  - Exactly one management operation may be selected per invocation.\n");
   fprintf(out, "  - Management operations cannot be combined with standalone run output redirection except attach.\n");
@@ -955,6 +1013,23 @@ static void print_snapshot_rows(const char *cells, uint16_t rows, uint16_t cols)
   }
 }
 
+static void print_snapshot_text_summary(
+    const struct ptyterm_screen_snapshot_response *response,
+    const char *fg_task) {
+  printf("session id: %u\n", response->session_id);
+  printf("screen: %s\n", ptyterm_screen_selector_name(response->selected_screen));
+  printf("state: %s\n", ptyterm_session_state_name(response->state));
+  printf("generation: %llu\n", (unsigned long long)response->generation);
+  printf("foreground pgid: %d\n", response->fg_pgid);
+  printf("foreground task: %s\n", fg_task);
+  printf("shell returned: %s\n", response->shell_returned ? "yes" : "no");
+  printf("rows: %u\n", response->rows);
+  printf("cols: %u\n", response->cols);
+  printf("cursor row: %u\n", (unsigned int)response->cursor_row + 1);
+  printf("cursor col: %u\n", (unsigned int)response->cursor_col + 1);
+  printf("cursor visible: %s\n", response->cursor_visible ? "yes" : "no");
+}
+
 static int write_snapshot_kv_escaped(const char *data, size_t size) {
   size_t offset;
 
@@ -1001,11 +1076,86 @@ static int print_snapshot_rows_kv(const char *cells, uint16_t rows,
   return EXIT_SUCCESS;
 }
 
+static void print_snapshot_kv_summary(
+    const struct ptyterm_screen_snapshot_response *response,
+    const char *fg_task) {
+  printf("session_id=%u\n", response->session_id);
+  printf("screen=%s\n", ptyterm_screen_selector_name(response->selected_screen));
+  printf("state=%s\n", ptyterm_session_state_name(response->state));
+  printf("generation=%llu\n", (unsigned long long)response->generation);
+  printf("foreground_pgid=%d\n", response->fg_pgid);
+  printf("foreground_task=%s\n", fg_task);
+  printf("shell_returned=%s\n", response->shell_returned ? "yes" : "no");
+  printf("rows=%u\n", response->rows);
+  printf("cols=%u\n", response->cols);
+  printf("cursor_row=%u\n", (unsigned int)response->cursor_row + 1);
+  printf("cursor_col=%u\n", (unsigned int)response->cursor_col + 1);
+  printf("cursor_visible=%s\n", response->cursor_visible ? "yes" : "no");
+}
+
+static int print_snapshot_output(
+    const struct ptyterm_screen_snapshot_response *response, const char *cells,
+    int status_format) {
+  const char *fg_task;
+
+  fg_task = response->fg_task[0] != '\0' ? response->fg_task : "-";
+  if (status_format == PTYTERM_STATUS_FORMAT_TEXT) {
+    print_snapshot_text_summary(response, fg_task);
+    printf("\n");
+    print_snapshot_rows(cells, response->rows, response->cols);
+    return EXIT_SUCCESS;
+  }
+
+  print_snapshot_kv_summary(response, fg_task);
+  return print_snapshot_rows_kv(cells, response->rows, response->cols);
+}
+
+static int snapshot_matches_wait_predicate(
+    const struct ptyterm_screen_snapshot_response *baseline,
+    const struct ptyterm_screen_snapshot_response *current, int predicate) {
+  switch (predicate) {
+  case PTYTERM_WAIT_PREDICATE_SNAPSHOT_CHANGED:
+    return current->generation > baseline->generation;
+  case PTYTERM_WAIT_PREDICATE_FOREGROUND_CHANGED:
+    return current->generation > baseline->generation &&
+           current->fg_pgid != baseline->fg_pgid;
+  case PTYTERM_WAIT_PREDICATE_SHELL_RETURNED:
+    return current->generation > baseline->generation &&
+           current->shell_returned != 0;
+  case PTYTERM_WAIT_PREDICATE_SESSION_EXITED:
+    return current->generation > baseline->generation &&
+           current->state == PTYTERM_SESSION_EXITED;
+  case PTYTERM_WAIT_PREDICATE_CURSOR_CHANGED:
+    return current->generation > baseline->generation &&
+           (current->cursor_row != baseline->cursor_row ||
+            current->cursor_col != baseline->cursor_col ||
+            current->cursor_visible != baseline->cursor_visible);
+  default:
+    return 0;
+  }
+}
+
+static int print_wait_snapshot_result(
+    const struct ptyterm_screen_snapshot_response *response, const char *cells,
+    int status_format, const char *outcome, const char *matched_predicate) {
+  if (status_format == PTYTERM_STATUS_FORMAT_TEXT) {
+    printf("wait outcome: %s\n", outcome);
+    if (matched_predicate != NULL)
+      printf("matched predicate: %s\n", matched_predicate);
+    printf("\n");
+  } else {
+    printf("wait_outcome=%s\n", outcome);
+    if (matched_predicate != NULL)
+      printf("matched_predicate=%s\n", matched_predicate);
+  }
+
+  return print_snapshot_output(response, cells, status_format);
+}
+
 static int run_snapshot_client(const char *socket_path, int session_id,
                                uint32_t screen_selector, int status_format) {
   struct ptyterm_screen_snapshot_response response;
   char *cells;
-  const char *fg_task;
   int result;
 
   if (request_screen_snapshot_client(socket_path, session_id, screen_selector,
@@ -1013,40 +1163,87 @@ static int run_snapshot_client(const char *socket_path, int session_id,
     return EXIT_FAILURE;
   }
 
-  fg_task = response.fg_task[0] != '\0' ? response.fg_task : "-";
-  result = EXIT_SUCCESS;
-  if (status_format == PTYTERM_STATUS_FORMAT_TEXT) {
-    printf("session id: %u\n", response.session_id);
-    printf("screen: %s\n", ptyterm_screen_selector_name(response.selected_screen));
-    printf("state: %s\n", ptyterm_session_state_name(response.state));
-    printf("generation: %llu\n", (unsigned long long)response.generation);
-    printf("foreground pgid: %d\n", response.fg_pgid);
-    printf("foreground task: %s\n", fg_task);
-    printf("shell returned: %s\n", response.shell_returned ? "yes" : "no");
-    printf("rows: %u\n", response.rows);
-    printf("cols: %u\n", response.cols);
-    printf("cursor row: %u\n", (unsigned int)response.cursor_row + 1);
-    printf("cursor col: %u\n", (unsigned int)response.cursor_col + 1);
-    printf("cursor visible: %s\n", response.cursor_visible ? "yes" : "no");
-    printf("\n");
-    print_snapshot_rows(cells, response.rows, response.cols);
-  } else {
-    printf("session_id=%u\n", response.session_id);
-    printf("screen=%s\n", ptyterm_screen_selector_name(response.selected_screen));
-    printf("state=%s\n", ptyterm_session_state_name(response.state));
-    printf("generation=%llu\n", (unsigned long long)response.generation);
-    printf("foreground_pgid=%d\n", response.fg_pgid);
-    printf("foreground_task=%s\n", fg_task);
-    printf("shell_returned=%s\n", response.shell_returned ? "yes" : "no");
-    printf("rows=%u\n", response.rows);
-    printf("cols=%u\n", response.cols);
-    printf("cursor_row=%u\n", (unsigned int)response.cursor_row + 1);
-    printf("cursor_col=%u\n", (unsigned int)response.cursor_col + 1);
-    printf("cursor_visible=%s\n", response.cursor_visible ? "yes" : "no");
-    result = print_snapshot_rows_kv(cells, response.rows, response.cols);
-  }
+  result = print_snapshot_output(&response, cells, status_format);
   free(cells);
   return result;
+}
+
+static int run_wait_state_client(const char *socket_path, int session_id,
+                                 uint32_t screen_selector, int predicate,
+                                 uint64_t wait_timeout_ms, int status_format) {
+  struct ptyterm_screen_snapshot_response baseline;
+  struct ptyterm_screen_snapshot_response latest;
+  struct ptyterm_screen_snapshot_response current;
+  char *baseline_cells;
+  char *latest_cells;
+  char *current_cells;
+  uint64_t start_ms;
+  const char *predicate_name;
+
+  predicate_name = wait_predicate_name(predicate);
+  if (request_screen_snapshot_client(socket_path, session_id, screen_selector,
+                                     &baseline, &baseline_cells) != EXIT_SUCCESS) {
+    return EXIT_FAILURE;
+  }
+
+  latest = baseline;
+  latest_cells = baseline_cells;
+  if (baseline.state == PTYTERM_SESSION_EXITED) {
+    return print_wait_snapshot_result(&latest, latest_cells, status_format,
+                                      "session_exited", NULL);
+  }
+
+  if (monotonic_time_ms(&start_ms) == -1) {
+    perror("clock_gettime");
+    free(latest_cells);
+    return EXIT_FAILURE;
+  }
+
+  for (;;) {
+    uint64_t now_ms;
+
+    if (monotonic_time_ms(&now_ms) == -1) {
+      perror("clock_gettime");
+      free(latest_cells);
+      return EXIT_FAILURE;
+    }
+    if (now_ms - start_ms >= wait_timeout_ms) {
+      int result;
+
+      result = print_wait_snapshot_result(&latest, latest_cells, status_format,
+                                          "timeout", NULL);
+      free(latest_cells);
+      return result == EXIT_SUCCESS ? EXIT_FAILURE : result;
+    }
+
+    usleep(100000);
+    if (request_screen_snapshot_client(socket_path, session_id, screen_selector,
+                                       &current, &current_cells) != EXIT_SUCCESS) {
+      free(latest_cells);
+      return EXIT_FAILURE;
+    }
+
+    free(latest_cells);
+    latest = current;
+    latest_cells = current_cells;
+
+    if (snapshot_matches_wait_predicate(&baseline, &latest, predicate)) {
+      int result;
+
+      result = print_wait_snapshot_result(&latest, latest_cells, status_format,
+                                          "matched", predicate_name);
+      free(latest_cells);
+      return result;
+    }
+    if (latest.state == PTYTERM_SESSION_EXITED) {
+      int result;
+
+      result = print_wait_snapshot_result(&latest, latest_cells, status_format,
+                                          "session_exited", NULL);
+      free(latest_cells);
+      return result;
+    }
+  }
 }
 
 static int run_create_client(const char *socket_path, int cmd_argc,
@@ -2355,12 +2552,14 @@ int main(int argc, char *const argv[]) {
   int help_format = PTYTERM_HELP_FORMAT_TEXT;
   int list_requested = 0;
   int snapshot_requested = 0;
+  int wait_predicate = PTYTERM_WAIT_PREDICATE_NONE;
   int recv_peek = 0;
   int recv_format = PTYTERM_RECV_FORMAT_AUTO;
   int recv_control_mode = PTYTERM_RECV_CONTROL_WITHOUT;
   int filter_mode = PTYTERM_FILTER_MODE_NONE;
   const char *recv_until = NULL;
   uint64_t recv_timeout_ms = 0;
+  uint64_t wait_timeout_ms = 0;
   int resize_requested = 0;
   int recv_requested = 0;
   int screen_selector = PTYTERM_SCREEN_SELECTOR_ACTIVE;
@@ -2390,6 +2589,8 @@ int main(int argc, char *const argv[]) {
       OPT_RECV_UNTIL,
       OPT_PEEK,
       OPT_SNAPSHOT,
+      OPT_WAIT_STATE,
+      OPT_WAIT_TIMEOUT,
       OPT_SCREEN,
       OPT_DAEMON_STATUS,
       OPT_DAEMON_STOP,
@@ -2420,6 +2621,8 @@ int main(int argc, char *const argv[]) {
                        {"recv-until", required_argument, NULL, OPT_RECV_UNTIL},
                        {"peek", no_argument, NULL, OPT_PEEK},
                        {"snapshot", no_argument, NULL, OPT_SNAPSHOT},
+                       {"wait-state", required_argument, NULL, OPT_WAIT_STATE},
+                       {"wait-timeout", required_argument, NULL, OPT_WAIT_TIMEOUT},
                        {"screen", required_argument, NULL, OPT_SCREEN},
                        {"socket", required_argument, NULL, 's'},
                        {"buffer-info", no_argument, NULL, 'B'},
@@ -2507,6 +2710,15 @@ int main(int argc, char *const argv[]) {
     case OPT_SNAPSHOT:
       snapshot_requested = 1;
       break;
+    case OPT_WAIT_STATE:
+      wait_predicate = parse_wait_predicate(optarg);
+      if (wait_predicate < 0)
+        return usage_error(argv[0], "unsupported wait-state predicate: %s", optarg);
+      break;
+    case OPT_WAIT_TIMEOUT:
+      if (parse_duration_ms(optarg, &wait_timeout_ms) == -1)
+        return usage_error(argv[0], "invalid wait-timeout: %s", optarg);
+      break;
     case OPT_SCREEN:
       screen_selector = parse_screen_selector(optarg);
       if (screen_selector < 0)
@@ -2581,8 +2793,13 @@ int main(int argc, char *const argv[]) {
 
   if (recv_peek && !recv_requested)
     return usage_error(argv[0], "--peek requires --recv");
-  if (screen_selector != PTYTERM_SCREEN_SELECTOR_ACTIVE && !snapshot_requested)
-    return usage_error(argv[0], "--screen requires --snapshot");
+  if (screen_selector != PTYTERM_SCREEN_SELECTOR_ACTIVE &&
+      !snapshot_requested && wait_predicate == PTYTERM_WAIT_PREDICATE_NONE)
+    return usage_error(argv[0], "--screen requires --snapshot or --wait-state");
+  if (wait_predicate != PTYTERM_WAIT_PREDICATE_NONE && wait_timeout_ms == 0)
+    return usage_error(argv[0], "--wait-state requires --wait-timeout=DURATION");
+  if (wait_timeout_ms != 0 && wait_predicate == PTYTERM_WAIT_PREDICATE_NONE)
+    return usage_error(argv[0], "--wait-timeout requires --wait-state");
   if (recv_format != PTYTERM_RECV_FORMAT_AUTO && !recv_requested)
     return usage_error(argv[0], "--recv-format requires --recv");
   if (recv_control_mode != PTYTERM_RECV_CONTROL_WITHOUT && !recv_requested)
@@ -2603,6 +2820,7 @@ int main(int argc, char *const argv[]) {
       (resize_requested != 0) +
         (buffer_info_requested != 0) + (recv_requested != 0) +
         (snapshot_requested != 0) +
+        (wait_predicate != PTYTERM_WAIT_PREDICATE_NONE) +
           (send_data != NULL) >
       1) {
     return usage_error(argv[0], "select only one management operation");
@@ -2613,6 +2831,7 @@ int main(int argc, char *const argv[]) {
        (detach_requested != 0) + (list_requested != 0) +
       (resize_requested != 0) + (buffer_info_requested != 0) +
       (recv_requested != 0) + (snapshot_requested != 0) +
+      (wait_predicate != PTYTERM_WAIT_PREDICATE_NONE) +
       (send_data != NULL) +
        (filter_mode != PTYTERM_FILTER_MODE_NONE)) > 1) {
     return usage_error(argv[0],
@@ -2639,7 +2858,8 @@ int main(int argc, char *const argv[]) {
       daemon_stop_requested || detach_requested ||
       resize_requested ||
       list_requested || buffer_info_requested ||
-      recv_requested || snapshot_requested || send_data != NULL) {
+      recv_requested || snapshot_requested ||
+      wait_predicate != PTYTERM_WAIT_PREDICATE_NONE || send_data != NULL) {
     if ((ifile || ofile || afile ||
          ((opt_cols > 0 || opt_lines > 0) && !resize_requested)) &&
         !attach_requested) {
@@ -2688,6 +2908,12 @@ int main(int argc, char *const argv[]) {
                                  (uint32_t)screen_selector,
                                  status_format_explicit ? status_format
                                                         : PTYTERM_STATUS_FORMAT_TEXT);
+    if (wait_predicate != PTYTERM_WAIT_PREDICATE_NONE)
+      return run_wait_state_client(socket_path, session_id,
+                                   (uint32_t)screen_selector, wait_predicate,
+                                   wait_timeout_ms,
+                                   status_format_explicit ? status_format
+                                                          : PTYTERM_STATUS_FORMAT_TEXT);
     if (recv_requested)
       return run_recv_client(socket_path, session_id, recv_size, recv_peek,
                              recv_timeout_ms, recv_until, recv_format,

@@ -114,6 +114,18 @@ printf '%s\n' "$out" | grep -q -- "--snapshot" || {
   exit 1
 }
 
+printf '%s\n' "$out" | grep -q -- "--wait-state=PREDICATE" || {
+  echo "ptyterm -h: expected wait-state option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--wait-timeout=DURATION" || {
+  echo "ptyterm -h: expected wait-timeout option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
 printf '%s\n' "$out" | grep -q -- "--screen=active|main|alt" || {
   echo "ptyterm -h: expected screen option in output" >&2
   printf '%s\n' "$out" >&2
@@ -158,6 +170,12 @@ printf '%s\n' "$out" | grep -q -- "--session=1 --recv" || {
 
 printf '%s\n' "$out" | grep -q -- "--session=1 --snapshot" || {
   echo "ptyterm -h: expected snapshot example in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--session=1 --wait-state=snapshot-changed --wait-timeout=2s" || {
+  echo "ptyterm -h: expected wait-state example in output" >&2
   printf '%s\n' "$out" >&2
   exit 1
 }

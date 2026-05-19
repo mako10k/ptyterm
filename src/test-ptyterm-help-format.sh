@@ -61,6 +61,18 @@ printf '%s\n' "$out" | grep -q 'long: --screen' || {
   exit 1
 }
 
+printf '%s\n' "$out" | grep -q 'long: --wait-state' || {
+  echo "ptyterm --help-format=yaml: expected wait-state option entry" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q 'long: --wait-timeout' || {
+  echo "ptyterm --help-format=yaml: expected wait-timeout option entry" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
 printf '%s\n' "$out" | grep -q 'long: --escape' || {
   echo "ptyterm --help-format=yaml: expected escape option entry" >&2
   printf '%s\n' "$out" >&2
@@ -87,6 +99,12 @@ printf '%s\n' "$out" | grep -q "command: \".*--session=1 --recv\"" || {
 
 printf '%s\n' "$out" | grep -q "command: \".*--session=1 --snapshot\"" || {
   echo "ptyterm --help-format=yaml: expected snapshot example command" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q "command: \".*--session=1 --wait-state=snapshot-changed --wait-timeout=2s\"" || {
+  echo "ptyterm --help-format=yaml: expected wait-state example command" >&2
   printf '%s\n' "$out" >&2
   exit 1
 }
