@@ -1316,6 +1316,179 @@ screen_snapshot_response {
     cells[]
   }
 }
+
+## Standards Compliance Priority Plan
+
+The current implementation is not a full VT100, VT220, or xterm emulator.
+
+Observed implementation constraints today:
+
+- The screen buffer stores one `char` per cell rather than a structured cell model.
+- Snapshot transport exposes plain cell bytes plus minimal cursor and foreground-task metadata.
+- SGR is parsed only as a no-op command boundary rather than as attribute state.
+- Alternate screen switching exists, but broader terminal mode state is not modeled.
+- OSC, mouse protocols, and other metadata-oriented escape families are not represented in parser state.
+
+Because of those constraints, standards work should be prioritized in dependency order rather than by feature popularity alone.
+
+### Priority 1: Unicode cell model and attribute state foundation
+
+Standards and specs to align with:
+
+- Unicode scalar decoding for terminal text input
+- East Asian Width behavior sufficient for CJK full-width cells
+- Combining-mark and grapheme-boundary handling sufficient for terminal snapshots
+- SGR attribute state as defined by ECMA-48 / ISO 6429
+
+Why this comes first:
+
+- The current `char`-per-cell model blocks correct CJK rendering, correct width accounting, and any meaningful color or style fidelity.
+- Richer escape-sequence coverage added on top of the current cell model would lock in the wrong data shape.
+- The screen-state design already assumes that each cell conceptually has glyph, width, and attributes.
+
+Required deliverables:
+
+- Replace byte-only cells with a structured cell model.
+- Add UTF-8 decoding before screen-cell insertion.
+- Track display width explicitly for at least narrow, wide, and continuation cells.
+- Add persistent per-cell attributes for the core SGR set.
+- Update snapshot transport so it no longer assumes one byte equals one cell.
+
+Exit criteria:
+
+- ASCII still renders correctly.
+- CJK wide characters occupy the correct number of columns.
+- Combining marks do not corrupt cursor accounting.
+- A snapshot can faithfully carry glyph, width, and core attribute information.
+
+### Priority 2: Core ECMA-48 and DEC terminal-state completeness
+
+Standards and families to align with:
+
+- ECMA-48 / ISO 6429 core CSI editing and cursor movement behavior
+- DEC VT100 / VT220 private modes required by common full-screen TUIs
+
+Why this comes second:
+
+- Once the cell and attribute model is correct, core terminal-state behavior becomes worth making more complete.
+- This priority is what moves the implementation from a lightweight parser toward a credible screen-state terminal model.
+- It also has the highest user-visible payoff for applications such as `top`, `less`, shells, and curses-style TUIs.
+
+Recommended scope for this phase:
+
+- Scroll-region support.
+- Insert/delete character and line operations.
+- Better erase semantics where still incomplete.
+- Wrap mode, origin mode, and related cursor semantics.
+- Tab-stop policy if needed by observed applications.
+- Broader DECSET / DECRST handling beyond cursor visibility and alternate screen.
+
+Exit criteria:
+
+- Common line-oriented and full-screen terminal applications no longer depend on accidental behavior.
+- Cursor movement, erasure, and scrolling semantics are defined in state rather than approximated by incidental writes.
+
+### Priority 3: xterm-compatible color and display behavior
+
+Standards and de facto targets to align with:
+
+- ECMA-48 SGR baseline
+- xterm 16-color, 256-color, and truecolor conventions where practical
+
+Why this is third instead of first:
+
+- Color fidelity depends on the attribute model from Priority 1.
+- Modern TUI readability depends heavily on color, but color correctness without correct cell state is not durable.
+
+Recommended scope for this phase:
+
+- Standard SGR attribute persistence.
+- 8 / 16 color support.
+- 256-color SGR sequences.
+- Truecolor SGR sequences if the transport model can carry them cleanly.
+- Reset and default-color semantics.
+
+Exit criteria:
+
+- Snapshot state can distinguish foreground and background colors from plain text.
+- Typical xterm-oriented applications no longer collapse to monochrome snapshots.
+
+### Priority 4: xterm interaction protocols needed for rendered attach
+
+Standards and de facto targets to align with:
+
+- xterm mouse tracking protocols such as 1000, 1002, and 1006
+- xterm bracketed paste and related interactive-mode conventions
+- Focus in/out style interactive events if they become necessary
+
+Why this is fourth:
+
+- These features matter most once rendered interactive attach is real.
+- They are less critical for read-only snapshot fidelity than Unicode, attributes, and core cursor/edit semantics.
+- They require both parser-side state and client-to-session interaction policy, so they are better deferred until interactive renderer behavior is otherwise stable.
+
+Recommended scope for this phase:
+
+- Mouse-mode enable/disable state tracking.
+- Transport or attach-path decisions for forwarding mouse events.
+- Bracketed paste mode tracking and forwarding policy.
+- Clear interaction boundaries between local renderer controls and remote terminal input.
+
+Exit criteria:
+
+- Interactive rendered attach can support modern text UIs without falling back to raw attach for basic mouse or paste interactions.
+
+### Priority 5: OSC and higher-level metadata protocols
+
+Standards and de facto targets to align with:
+
+- OSC 0 / 2 window-title behavior
+- OSC 8 hyperlinks if desired
+- OSC 52 clipboard integration only if the project explicitly wants it
+
+Why this is later:
+
+- These are metadata and UX niceties rather than prerequisites for terminal-screen correctness.
+- They add policy questions around exposure, transport shape, and security that should not block the core terminal model.
+
+Recommended scope for this phase:
+
+- Title-state storage in the daemon-side terminal model.
+- Optional exposure through snapshot metadata.
+- Explicit opt-in policy for sensitive OSC families such as clipboard-related sequences.
+
+Exit criteria:
+
+- Metadata protocols are represented intentionally rather than being silently ignored or half-parsed.
+
+### Priority summary
+
+The implementation order should be:
+
+1. Unicode, width, and per-cell attribute foundation.
+2. Core ECMA-48 and DEC terminal-state completeness.
+3. xterm color fidelity.
+4. xterm interaction protocols for rendered attach.
+5. OSC and higher-level metadata protocols.
+
+This order is intentional.
+
+- Priority 1 fixes the data model so later conformance work has somewhere correct to land.
+- Priority 2 makes the terminal state trustworthy.
+- Priority 3 improves readability and application fidelity.
+- Priority 4 unlocks interactive renderer completeness.
+- Priority 5 handles metadata once the core terminal contract is already defensible.
+
+### What not to prioritize early
+
+The following should not jump ahead of Priorities 1 and 2.
+
+- Title support by itself.
+- Clipboard-oriented OSC handling.
+- Fancy renderer-only formatting.
+- Broad xterm extension coverage without the underlying cell and mode model.
+
+Those features are easier to demo than to justify, but they do not solve the most constraining standards gaps in the current implementation.
 ```
 
 Rules:
