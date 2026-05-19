@@ -618,6 +618,422 @@ This ordering is intentional.
 - Milestone 4 serves the human inspection use case once the underlying contract is settled.
 - Milestone 5 is explicitly optional and should be justified by real usage, not by design completeness.
 
+## Terminal Buffer Renderer Design
+
+The current code already provides the two critical building blocks for a renderer-oriented client.
+
+- The daemon maintains a rendered screen model with main and alternate screens, cursor position, cursor visibility, resize handling, and a monotonic generation counter.
+- The client can already request a full screen snapshot independently from byte-stream `recv` and independently from interactive `attach`.
+
+That means the first renderer design should stay client-heavy.
+
+- Do not move rendering logic into the daemon in v1.
+- Do not overload `recv` with viewport semantics.
+- Do not replace `attach` immediately.
+- Build the first renderer on top of the existing snapshot contract and only introduce a new transport if polling proves too wasteful.
+
+### 1. View-only renderer
+
+This mode is for human or agent inspection of the current terminal state without attaching input to the session.
+
+Primary behavior:
+
+- Open a full-screen local viewer.
+- Render the selected session screen snapshot into the local terminal.
+- Exit only with `Ctrl+C` in v1.
+- When the remote screen is larger than the local terminal, allow scrolling with the arrow keys.
+- Never forward local keystrokes to the remote session.
+- Never send remote resize requests just because the local viewing terminal is smaller or larger.
+
+#### Proposed CLI shape
+
+Recommended canonical form:
+
+```sh
+ptyterm --view --session=ID
+```
+
+Recommended optional selectors:
+
+```sh
+ptyterm --view --session=ID [--screen=active|main|alt]
+ptyterm --view --session=ID [--view-refresh=100ms]
+```
+
+Design notes:
+
+- `--snapshot` remains the one-shot printable command.
+- `--view` becomes the stateful full-screen viewer.
+- The default screen selector should remain `active`.
+- `--view-refresh` is optional and can default internally without being documented first if the first implementation keeps the value fixed.
+
+#### Responsibilities split
+
+Daemon responsibilities:
+
+- Continue owning the terminal state model.
+- Continue exposing full-screen snapshots through the existing snapshot request and response.
+- Continue incrementing screen generation whenever the rendered state changes.
+
+Viewer responsibilities:
+
+- Put the local terminal into a viewer-friendly mode.
+- Request the initial snapshot.
+- Track the local viewport origin.
+- Re-render when the snapshot generation changes.
+- Re-render when the local terminal size changes.
+- Re-render when the user scrolls.
+- Restore the local terminal cleanly on exit.
+
+This keeps the ownership boundary simple: the daemon owns terminal truth, the viewer owns presentation and viewport policy.
+
+#### Rendering model
+
+The view-only renderer should use the local terminal alternate screen so it behaves like a transient inspector rather than printing an ever-growing log.
+
+Recommended local rendering behavior:
+
+- Enter local alternate screen on startup.
+- Hide the local cursor while rendering.
+- Draw a one-line status bar.
+- Draw the visible viewport below the status bar.
+- Leave one-line overlays or help out of scope for v1.
+- On exit, restore the original terminal mode, leave the alternate screen, and show the cursor again.
+
+Recommended status bar contents:
+
+- session id
+- selected screen: active/main/alt resolved value
+- remote screen size: rows x cols
+- viewport origin: top row and left column
+- foreground task if known
+- shell-returned yes/no
+- generation
+
+This gives enough context to understand whether the visible area is clipped and whether the underlying task has returned to the shell.
+
+#### Viewport and scrolling rules
+
+The viewport is local-display state, not daemon state.
+
+- `viewport_row` and `viewport_col` live only in the viewer.
+- The remote snapshot remains the full `rows x cols` grid returned by the daemon.
+- If the local terminal is smaller than the remote grid, clip to the visible rectangle.
+- If the local terminal is larger than the remote grid, render the remote cells in the upper-left and fill the remainder with spaces.
+
+Recommended scroll rules:
+
+- Up arrow: decrement `viewport_row` if greater than 0.
+- Down arrow: increment `viewport_row` if the bottom edge has not reached the remote row count.
+- Left arrow: decrement `viewport_col` if greater than 0.
+- Right arrow: increment `viewport_col` if the right edge has not reached the remote column count.
+- When the local terminal resizes, clamp the viewport to the new legal range.
+- When the remote snapshot size changes, clamp the viewport again against the new remote bounds.
+
+Visible height calculation:
+
+- Reserve one row for the status bar.
+- Use `local_rows - 1` for snapshot rows, with a floor of 1.
+- Use all local columns for the snapshot area.
+
+This design satisfies the immediate requirement for scrolling without introducing remote-side scrollback or resize side effects.
+
+#### Refresh model
+
+The simplest viable implementation is a polling viewer over the existing snapshot API.
+
+Loop outline:
+
+1. Request snapshot.
+2. If generation or geometry changed, redraw.
+3. Poll local keyboard input for arrow keys and `Ctrl+C`.
+4. Poll local window size changes.
+5. Sleep or `select(2)` until the next refresh tick.
+
+Why this is acceptable for v1:
+
+- The daemon already publishes full snapshots.
+- The snapshot payload is bounded by terminal size, not unbounded scrollback.
+- The implementation stays local to the client and does not require new wire protocol.
+
+When to revisit:
+
+- if refresh latency needs to drop well below the polling interval
+- if screen sizes make repeated full snapshots measurably expensive
+- if multiple viewers become necessary
+
+At that point a dedicated watch or delta transport can be added, but it should be justified by measured behavior rather than assumed upfront.
+
+#### Input handling
+
+The view-only renderer only needs a tiny key vocabulary.
+
+- Arrow keys: scroll viewport.
+- `Ctrl+C`: exit viewer.
+
+Everything else should be ignored in v1.
+
+That keeps the mode easy to explain and avoids accidental remote input.
+
+#### Interaction with existing operations
+
+`--view` should stay distinct from existing operations.
+
+- It is not `--attach`, because it does not connect local stdin/stdout directly to the PTY.
+- It is not `--snapshot`, because it is stateful and full-screen.
+- It is not `--recv`, because it consumes screen state instead of the shared byte stream.
+
+The practical implementation consequence is that `--view` should use snapshot requests plus local terminal control, but should not take ownership of session attachment state.
+
+#### Failure and exit behavior
+
+Expected exit paths:
+
+- `Ctrl+C` from the local viewer
+- socket or daemon disconnect
+- session no longer exists
+- fatal local terminal error
+
+Recommended behavior:
+
+- Always restore local terminal state first.
+- Then print any fatal diagnostic on standard error.
+- If the session exits while viewing, keep the last snapshot visible until the user exits or until a fatal transport error occurs.
+
+That last point is important for inspection: an exited session still has meaningful final screen state.
+
+### 2. Interactive renderer concept
+
+The second renderer is intentionally only a concept for now.
+
+Goal:
+
+- Provide a renderer-driven attach mode where the local client paints from screen state and forwards user input intentionally, rather than relying on raw PTY passthrough.
+
+This heads toward a Screen/TMux-like interaction model, but the design should resist taking on multiplexer complexity too early.
+
+#### Recommended boundary
+
+Treat the interactive renderer as a new client mode, not as a daemon rewrite.
+
+- The daemon should remain the owner of the PTY master and rendered terminal state.
+- The interactive renderer should consume screen state and send input events or byte sequences.
+- Existing raw `--attach` should remain available as the low-level compatibility path.
+
+This gives three tiers instead of one forced migration.
+
+- `--attach`: raw passthrough, closest to today
+- `--view`: rendered read-only inspection
+- future interactive renderer: rendered control mode
+
+#### Minimal product shape
+
+The first interactive renderer should aim for the smallest useful slice.
+
+- Single attached controller only.
+- Keyboard input forwarding only.
+- Local window resize forwarded to the daemon.
+- Full-screen redraw from snapshots.
+- No panes.
+- No split windows.
+- No detach key prefix design yet.
+- No copy mode, search mode, or scrollback browser in v1.
+
+That scope keeps it from collapsing into “build tmux”.
+
+#### Conceptual loop
+
+The future loop is still structurally simple.
+
+1. Renderer requests or subscribes to screen snapshots.
+2. Renderer paints the visible screen locally.
+3. Local key input is decoded.
+4. Printable bytes and terminal control sequences are forwarded to the session.
+5. Local `SIGWINCH` is translated into a daemon resize request.
+6. Updated snapshots drive the next redraw.
+
+The key difference from `--attach` is that the renderer is state-aware. It redraws from the daemon's terminal model instead of treating the socket as a byte pipe.
+
+#### Resize authority and opt-in follow-local mode
+
+Screen-size authority should be explicit rather than implicit.
+
+- `--view` remains read-only and must never resize the remote session.
+- The default policy for a renderer-driven control mode should be `preserve-remote`.
+- Under `preserve-remote`, the client adapts locally through clipping and scrolling, but does not mutate remote PTY geometry.
+- An explicit opt-in policy `follow-local` allows the controlling client to make the remote PTY follow the local terminal size.
+
+Recommended CLI shape:
+
+```sh
+ptyterm --attach-rendered --session=ID \
+  [--resize-mode=preserve-remote|follow-local]
+```
+
+Recommended `follow-local` behavior:
+
+- It is only valid for an interactive controlling attach, not for `--view`, `--snapshot`, or byte-stream operations.
+- The client sends one resize request immediately after attach using the current local size.
+- The client sends further resize requests on each local `SIGWINCH`.
+- Because v1 allows only one attached controller, resize authority stays unambiguous.
+- When the controlling client exits, the session keeps the last remote size until another controller explicitly changes it.
+
+Rationale:
+
+- Read-only inspection should stay non-mutating.
+- Terminal-style control workflows sometimes need the remote process to reflow against the local terminal geometry.
+- Making that behavior opt-in avoids surprising applications that treat PTY size as part of the remote execution environment.
+
+#### Transport direction
+
+The first implementation should not assume a large new protocol surface.
+
+Reasonable progression:
+
+- First try building on existing snapshot, send, and resize requests.
+- If that proves too latent or too chatty, add one long-lived render-session transport later.
+
+That deferred transport could carry:
+
+- snapshot generation notifications
+- full or delta screen payloads
+- input event acknowledgements
+- session state changes such as shell-returned or exited
+
+But none of that should be specified until the simpler composition has been tested.
+
+#### Mode separation
+
+The interactive renderer will need at least two internal concepts even if the CLI only exposes one mode.
+
+- render mode: local keys are interpreted as session input
+- local control path: reserved only for viewer exit and fatal cleanup
+
+For now, the only mandatory local escape should still be `Ctrl+C` or process termination. Designing a richer local command prefix can wait until real pain appears.
+
+#### Key risk areas to defer deliberately
+
+These are real concerns, but they should stay out of the first design commitment.
+
+- mouse reporting
+- bracketed paste awareness
+- UTF-8 double-width cell correctness beyond the current cell model
+- color and text attribute rendering
+- multiple simultaneous viewers or controllers
+- scrollback history beyond the visible screen buffers
+- client-side copy mode or search UI
+
+Deferring these is part of keeping the concept tractable.
+
+### Recommended implementation order for renderer work
+
+If renderer work starts soon, the least risky sequence is:
+
+1. Implement `--view` on top of the current snapshot API and local viewport logic.
+2. Validate that the viewer is genuinely useful for oversize screens and alternate-screen applications.
+3. Keep `follow-local` out of `--view`; that mode stays read-only and non-mutating.
+4. Build the first interactive renderer on top of existing snapshot, send, and resize requests.
+5. Include `follow-local` in that first interactive renderer rather than creating a separate resize-only milestone.
+6. Measure whether snapshot polling is actually a problem.
+7. Only then decide whether an interactive renderer needs a dedicated long-lived protocol.
+8. Keep raw `--attach` as the fallback path until the renderer path proves robust.
+
+This sequence matches the current codebase shape and keeps the first useful feature squarely in the read-only case the user asked for.
+
+### Delivery decision: start with `--view`, fold `follow-local` into interactive v1
+
+The implementation order should now be treated as decided rather than open.
+
+- Start with `--view` first.
+- Do not add any remote-resize behavior to `--view`.
+- When interactive renderer work starts, include `--resize-mode=follow-local` in its first usable milestone.
+- Do not create a separate project phase whose only purpose is resize-follow behavior.
+
+Why this is the right split:
+
+- `--view` is explicitly a read-only inspection mode, so adding remote mutation there would weaken the clearest boundary in the design.
+- The current raw attach path already has the essential resize-follow mechanics: it sends the initial local winsize and forwards later `SIGWINCH` changes.
+- There is already a focused shell test for that behavior.
+- Because the resize transport and daemon-side resize handling already exist, `follow-local` is not a large enough feature to justify its own milestone.
+
+In practice, that means the first interactive renderer can reuse an existing behavior shape:
+
+- on initial attach, send current local rows and columns when `--resize-mode=follow-local` is selected
+- on local `SIGWINCH`, send updated rows and columns again
+- under `preserve-remote`, skip those resize requests and keep the renderer purely local in how it adapts
+
+This keeps the sequencing simple.
+
+- Milestone A: useful read-only viewer
+- Milestone B: useful rendered interactive attach, including optional local-size following
+- Later milestones: only the parts that still need new protocol or UI complexity
+
+### Validation targets for that decision
+
+When implementation starts, the first checks should align with the split above.
+
+For `--view`:
+
+- verify that oversized remote screens can be inspected through viewport scrolling without sending daemon resize requests
+- verify alternate-screen applications remain inspectable
+- verify exiting the viewer restores the local terminal cleanly
+
+For interactive renderer v1 with `follow-local`:
+
+- verify `preserve-remote` does not change remote PTY geometry
+- verify `follow-local` sends the initial local winsize on attach
+- verify `follow-local` forwards later local `SIGWINCH` changes
+- verify the existing raw `--attach` resize behavior remains intact until the rendered path is trusted
+
+## GitHub Actions Runner Strategy
+
+Repository evidence today:
+
+- CI is currently defined in `.github/workflows/ci.yml`.
+- The workflow currently runs on `ubuntu-latest`.
+- There is no existing self-hosted label selection, local runner registration guidance, or built-in fallback orchestration.
+
+### Can a local GitHub Actions runner be configured?
+
+Yes.
+
+- A self-hosted runner can be registered for this repository or organization.
+- That runner can be used for local hardware access, persistent caches, or environment-specific checks.
+- In workflow terms, that means adding a separate job or workflow that targets `self-hosted` and any additional labels needed to select the right machine.
+
+### Can it run in the cloud only when the local runner cannot be reached?
+
+Not as a simple single-job `runs-on` fallback.
+
+- GitHub Actions does not treat `runs-on` as an ordered fallback list between `self-hosted` and GitHub-hosted runners.
+- A job that requires `self-hosted` will queue until a matching runner is available or until the workflow is cancelled or times out.
+- A job that targets `ubuntu-latest` runs on GitHub-hosted infrastructure instead.
+- Because of that split, “use local runner if reachable, otherwise transparently use cloud” needs orchestration above a single ordinary job definition.
+
+### Practical policy options
+
+Recommended baseline policy:
+
+- Keep GitHub-hosted `ubuntu-latest` as the required baseline CI path.
+- Add self-hosted execution as an additive path for workloads that benefit from the local machine.
+- Do not make repository health depend solely on self-hosted availability unless that dependency is intentional.
+
+Possible patterns:
+
+- Hosted baseline plus optional self-hosted job: simplest and most reliable.
+- Separate workflows: one hosted, one self-hosted, triggered intentionally for hardware-specific or local-environment runs.
+- External dispatcher: a higher-level script or service decides whether the local runner is reachable, then dispatches either a self-hosted or hosted workflow.
+
+The third pattern is the closest match to true fallback, but it is an orchestration design, not a native property of `runs-on`.
+
+### Recommendation for this repository
+
+Given the current repository state, the safest direction is:
+
+1. Keep the existing hosted runner path as the canonical CI baseline.
+2. Introduce a self-hosted runner only for additive value such as local hardware checks or faster iterative validation.
+3. If fallback is required, implement it as separate workflow selection or external dispatch logic, not as an assumption baked into one job.
+
 ### Milestone 1 decision: canonical screen-state model
 
 The following decisions fix the Milestone 1 baseline.
