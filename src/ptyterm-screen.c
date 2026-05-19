@@ -9,6 +9,7 @@ enum {
   PTYTERM_SCREEN_PARSER_TEXT = 0,
   PTYTERM_SCREEN_PARSER_ESC = 1,
   PTYTERM_SCREEN_PARSER_CSI = 2,
+  PTYTERM_SCREEN_PARSER_ESC_CHARSET = 3,
 };
 
 static size_t screen_cell_count(uint16_t rows, uint16_t cols) {
@@ -438,11 +439,20 @@ void ptyterm_screen_feed(struct ptyterm_screen_state *state, const char *data,
     byte = (unsigned char)data[i];
     buffer = selected_buffer(state, PTYTERM_SCREEN_SELECTOR_ACTIVE);
 
+    if (state->parser_state == PTYTERM_SCREEN_PARSER_ESC_CHARSET) {
+      state->parser_state = PTYTERM_SCREEN_PARSER_TEXT;
+      continue;
+    }
+
     if (state->parser_state == PTYTERM_SCREEN_PARSER_ESC) {
       state->parser_state = PTYTERM_SCREEN_PARSER_TEXT;
       if (byte == '[') {
         state->parser_state = PTYTERM_SCREEN_PARSER_CSI;
         state->csi_length = 0;
+        continue;
+      }
+      if (byte == '(' || byte == ')' || byte == '*' || byte == '+') {
+        state->parser_state = PTYTERM_SCREEN_PARSER_ESC_CHARSET;
         continue;
       }
       if (byte == '7') {

@@ -53,6 +53,12 @@ send_out=$(./ptyterm --send='HELLO\r\n' --session=1 --socket="$sock" 2>&1) || {
   exit 1
 }
 
+send_out=$(./ptyterm --send='\e(BASCII\r\n' --session=1 --socket="$sock" 2>&1) || {
+  echo "ptyterm --send for charset designation: expected success" >&2
+  printf '%s\n' "$send_out" >&2
+  exit 1
+}
+
 sleep 1
 
 ./ptyterm --snapshot --session=1 --socket="$sock" >"$snapshot_out" || {
@@ -78,6 +84,18 @@ grep -q '^HELLO$' "$snapshot_out" || {
   cat "$snapshot_out" >&2 || true
   exit 1
 }
+
+grep -q '^ASCII$' "$snapshot_out" || {
+  echo "ptyterm --snapshot: expected charset designation to be consumed" >&2
+  cat "$snapshot_out" >&2 || true
+  exit 1
+}
+
+if grep -q '^BASCII$' "$snapshot_out"; then
+  echo "ptyterm --snapshot: unexpected visible charset designation byte" >&2
+  cat "$snapshot_out" >&2 || true
+  exit 1
+fi
 
 send_out=$(./ptyterm --send='\e[?1049hALT\r\n' --session=1 --socket="$sock" 2>&1) || {
   echo "ptyterm --send for alt screen: expected success" >&2
