@@ -3157,6 +3157,18 @@ int main(int argc, char *const argv[]) {
                        "select only one management or filter operation");
   }
 
+  if (filter_mode == PTYTERM_FILTER_MODE_NONE &&
+      !attach_requested && !create_requested && !daemon_status_requested &&
+      !daemon_stop_requested && !detach_requested && !list_requested &&
+      !resize_requested && !buffer_info_requested && !recv_requested &&
+      !snapshot_requested && !view_requested &&
+      wait_predicate == PTYTERM_WAIT_PREDICATE_NONE && send_data == NULL &&
+      (session_id != PTYTERM_SESSION_ALL || socket_path != NULL ||
+       status_format_explicit)) {
+    return usage_error(argv[0],
+                       "management-only options require a management operation");
+  }
+
   if (filter_mode != PTYTERM_FILTER_MODE_NONE) {
     if (socket_path != NULL || session_id != PTYTERM_SESSION_ALL ||
         status_format != PTYTERM_STATUS_FORMAT_KV) {
