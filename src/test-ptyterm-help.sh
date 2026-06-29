@@ -90,6 +90,24 @@ printf '%s\n' "$out" | grep -q -- "--send=DATA" || {
   exit 1
 }
 
+printf '%s\n' "$out" | grep -q -- "--send-stdin" || {
+  echo "ptyterm -h: expected send-stdin option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--send-eol=none|lf|cr|crlf" || {
+  echo "ptyterm -h: expected send-eol option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "--redact-sent" || {
+  echo "ptyterm -h: expected redact-sent option in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
 printf '%s\n' "$out" | grep -q -- "--escape" || {
   echo "ptyterm -h: expected escape option in output" >&2
   printf '%s\n' "$out" >&2
@@ -164,6 +182,24 @@ printf '%s\n' "$out" | grep -q -- "Examples:" || {
 
 printf '%s\n' "$out" | grep -q -- "--session=1 --send='echo hello\\\\n'" || {
   echo "ptyterm -h: expected send example in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "secret-provider ROUTER_PASSWORD | .*--send-stdin --send-eol=cr --redact-sent" || {
+  echo "ptyterm -h: expected secret-provider send-stdin example in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "secdat get ROUTER_PASSWORD --stdout | .*--send-stdin --send-eol=cr --redact-sent" || {
+  echo "ptyterm -h: expected secdat send-stdin integration example in output" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+}
+
+printf '%s\n' "$out" | grep -q -- "secdat can be an optional stdin secret provider; ptyterm remains the PTY/session transport" || {
+  echo "ptyterm -h: expected secdat integration note in output" >&2
   printf '%s\n' "$out" >&2
   exit 1
 }

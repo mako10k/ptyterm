@@ -49,6 +49,10 @@ enum ptyterm_recv_flags {
   PTYTERM_RECV_FLAG_PEEK = 1u << 0,
 };
 
+enum ptyterm_send_flags {
+  PTYTERM_SEND_FLAG_REDACT_ECHO = 1u << 0,
+};
+
 enum ptyterm_screen_selector {
   PTYTERM_SCREEN_SELECTOR_ACTIVE = 1,
   PTYTERM_SCREEN_SELECTOR_MAIN = 2,
@@ -104,9 +108,16 @@ struct ptyterm_create_response {
   int32_t child_pid;
 };
 
+struct ptyterm_send_request_v1 {
+  int32_t session_id;
+  uint32_t data_size;
+};
+
 struct ptyterm_send_request {
   int32_t session_id;
   uint32_t data_size;
+  uint32_t flags;
+  uint32_t redact_size;
 };
 
 struct ptyterm_send_response {

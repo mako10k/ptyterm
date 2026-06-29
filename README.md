@@ -87,6 +87,22 @@ Daemon-backed management auto-starts `ptytermd` when needed:
 ./src/ptyterm --daemon-stop
 ```
 
+Secret input can be piped into a managed session without placing the secret in
+argv, shell history, or ordinary ptyterm output buffers. `--redact-sent`
+redacts bytes sent through `--send-stdin` if the remote side echoes them:
+
+```sh
+secret-provider ROUTER_PASSWORD | ./src/ptyterm --session=1 --send-stdin --send-eol=cr --redact-sent
+```
+
+`secdat` can be used as one optional secret provider while `ptyterm` remains
+the terminal/session transport. The tools are loosely coupled through
+stdin/stdout; neither binary requires the other:
+
+```sh
+secdat get ROUTER_PASSWORD --stdout | ./src/ptyterm --session=1 --send-stdin --send-eol=cr --redact-sent
+```
+
 Help and automation discovery:
 
 ```sh
@@ -166,4 +182,3 @@ Log output to a file:
 ```sh
 cat bigfile | ./src/pbuf --buffer-size=1m > /tmp/out
 ```
-

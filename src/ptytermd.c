@@ -21,7 +21,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
+
+enum {
+  PTYTERM_REDACTION_TTL_SECONDS = 300,
+  PTYTERM_REDACTION_HOLD_SECONDS = 5,
+  PTYTERM_REDACTION_OUTPUT_WINDOW = 1024 * 1024,
+};
 
 struct ptyterm_session {
   uint32_t id;
@@ -46,9 +53,30 @@ struct ptyterm_session {
   size_t ring_start;
   size_t ring_len;
   char *output_ring;
+  struct ptyterm_redaction *redaction_head;
+  struct ptyterm_redaction *redaction_tail;
+  char *redaction_hold;
+  size_t redaction_hold_size;
+  size_t redaction_hold_capacity;
+  time_t redaction_hold_expires_at;
+  size_t redaction_mask_remaining;
   struct ptyterm_screen_state screen;
   char tty_name[PTYTERM_TTY_NAME_MAX];
   char command[PTYTERM_COMMAND_MAX];
+};
+
+struct ptyterm_redaction_hash {
+  uint64_t first;
+  uint64_t second;
+};
+
+struct ptyterm_redaction {
+  char *data;
+  struct ptyterm_redaction_hash *prefix_hashes;
+  size_t size;
+  time_t expires_at;
+  uint64_t expire_output_offset;
+  struct ptyterm_redaction *next;
 };
 
 struct ptyterm_daemon_state {
@@ -58,6 +86,18 @@ struct ptyterm_daemon_state {
   struct ptyterm_session sessions[32];
   size_t session_count;
 };
+
+static void append_output(struct ptyterm_session *session, const char *buffer,
+                          size_t size);
+static void close_attached_client(struct ptyterm_session *session);
+static void clear_redactions(struct ptyterm_session *session);
+static void free_redaction(struct ptyterm_redaction *redaction);
+static int append_pending_output(struct ptyterm_session *session,
+                                 const char *data, size_t data_size);
+static int flush_pending_data(int fd, char *buffer, size_t *size);
+
+static uint64_t redaction_hash_key_first;
+static uint64_t redaction_hash_key_second;
 
 struct ptyterm_foreground_task_info {
   int32_t pgid;
@@ -128,6 +168,634 @@ static void request_stop(int sig) {
 static void cleanup_socket(void) {
   if (cleanup_socket_path[0] != '\0')
     unlink(cleanup_socket_path);
+}
+
+static void clear_sensitive_memory(void *buffer, size_t size) {
+  volatile unsigned char *cursor;
+
+  cursor = (volatile unsigned char *)buffer;
+  while (size > 0) {
+    *cursor++ = 0;
+    --size;
+  }
+}
+
+static uint64_t hash_bytes_with_key(const char *data, size_t size,
+                                    uint64_t key, uint64_t prime) {
+  uint64_t hash;
+  size_t i;
+
+  hash = UINT64_C(1469598103934665603) ^ key;
+  for (i = 0; i < size; ++i) {
+    hash ^= (unsigned char)data[i];
+    hash *= prime;
+  }
+  return hash;
+}
+
+static struct ptyterm_redaction_hash redaction_hash_bytes(const char *data,
+                                                          size_t size) {
+  struct ptyterm_redaction_hash hash;
+
+  hash.first = hash_bytes_with_key(data, size, redaction_hash_key_first,
+                                   UINT64_C(1099511628211));
+  hash.second = hash_bytes_with_key(data, size, redaction_hash_key_second,
+                                    UINT64_C(14029467366897019727));
+  return hash;
+}
+
+static int redaction_hash_equal(struct ptyterm_redaction_hash left,
+                                struct ptyterm_redaction_hash right) {
+  return left.first == right.first && left.second == right.second;
+}
+
+static void init_redaction_hash_keys(void) {
+  uint64_t keys[2];
+  int fd;
+  size_t offset;
+
+  if (redaction_hash_key_first != 0 || redaction_hash_key_second != 0)
+    return;
+
+  memset(keys, 0, sizeof(keys));
+  fd = open("/dev/urandom", O_RDONLY);
+  if (fd >= 0) {
+    offset = 0;
+    while (offset < sizeof(keys)) {
+      ssize_t nread;
+
+      nread = read(fd, (char *)keys + offset, sizeof(keys) - offset);
+      if (nread == -1) {
+        if (errno == EINTR)
+          continue;
+        break;
+      }
+      if (nread == 0)
+        break;
+      offset += (size_t)nread;
+    }
+    close(fd);
+  }
+
+  if (keys[0] == 0 && keys[1] == 0) {
+    keys[0] = (uint64_t)time(NULL) ^ ((uint64_t)getpid() << 32);
+    keys[1] = (uint64_t)(uintptr_t)&keys ^
+        UINT64_C(0x9e3779b97f4a7c15);
+  }
+  redaction_hash_key_first = keys[0] == 0 ?
+      UINT64_C(0x9e3779b97f4a7c15) : keys[0];
+  redaction_hash_key_second = keys[1] == 0 ?
+      UINT64_C(0xbf58476d1ce4e5b9) : keys[1];
+  clear_sensitive_memory(keys, sizeof(keys));
+}
+
+static int populate_redaction_prefix_hashes(
+    struct ptyterm_redaction *redaction, const char *data, size_t size) {
+  size_t i;
+
+  redaction->prefix_hashes = calloc(size, sizeof(*redaction->prefix_hashes));
+  if (redaction->prefix_hashes == NULL)
+    return -1;
+
+  for (i = 0; i < size; ++i)
+    redaction->prefix_hashes[i] = redaction_hash_bytes(data, i + 1);
+  return 0;
+}
+
+static void discard_redaction_plaintext(struct ptyterm_redaction *redaction) {
+  if (redaction->data == NULL)
+    return;
+  clear_sensitive_memory(redaction->data, redaction->size);
+  free(redaction->data);
+  redaction->data = NULL;
+}
+
+static int redaction_prefix_matches(const struct ptyterm_redaction *redaction,
+                                    const char *data, size_t size) {
+  struct ptyterm_redaction_hash hash;
+
+  if (size == 0)
+    return 1;
+  if (size > redaction->size)
+    return 0;
+  if (redaction->data != NULL)
+    return memcmp(redaction->data, data, size) == 0;
+
+  hash = redaction_hash_bytes(data, size);
+  return redaction_hash_equal(hash, redaction->prefix_hashes[size - 1]);
+}
+
+static int redaction_matches_hold(const struct ptyterm_session *session,
+                                  const struct ptyterm_redaction *redaction) {
+  if (session->redaction_hold_size == 0 ||
+      session->redaction_hold_size >= redaction->size) {
+    return 0;
+  }
+  return redaction_prefix_matches(redaction, session->redaction_hold,
+                                  session->redaction_hold_size);
+}
+
+static void queue_redaction_mask_continuation(struct ptyterm_session *session,
+                                              size_t remaining_size) {
+  if (remaining_size > session->redaction_mask_remaining)
+    session->redaction_mask_remaining = remaining_size;
+}
+
+static struct ptyterm_redaction *create_redaction(const char *data,
+                                                  size_t size) {
+  struct ptyterm_redaction *redaction;
+
+  if (size == 0)
+    return NULL;
+
+  redaction = calloc(1, sizeof(*redaction));
+  if (redaction == NULL)
+    return NULL;
+  redaction->data = malloc(size);
+  if (redaction->data == NULL) {
+    free(redaction);
+    return NULL;
+  }
+
+  memcpy(redaction->data, data, size);
+  redaction->size = size;
+  if (populate_redaction_prefix_hashes(redaction, data, size) == -1) {
+    free_redaction(redaction);
+    return NULL;
+  }
+  return redaction;
+}
+
+static void free_redaction(struct ptyterm_redaction *redaction) {
+  if (redaction == NULL)
+    return;
+  discard_redaction_plaintext(redaction);
+  if (redaction->prefix_hashes != NULL) {
+    clear_sensitive_memory(redaction->prefix_hashes,
+                           redaction->size * sizeof(*redaction->prefix_hashes));
+    free(redaction->prefix_hashes);
+  }
+  clear_sensitive_memory(redaction, sizeof(*redaction));
+  free(redaction);
+}
+
+static void append_redaction(struct ptyterm_session *session,
+                             struct ptyterm_redaction *redaction) {
+  if (redaction == NULL)
+    return;
+
+  redaction->next = NULL;
+  if (session->redaction_tail == NULL) {
+    session->redaction_head = redaction;
+    session->redaction_tail = redaction;
+    return;
+  }
+  session->redaction_tail->next = redaction;
+  session->redaction_tail = redaction;
+}
+
+static void pop_redaction(struct ptyterm_session *session) {
+  struct ptyterm_redaction *redaction;
+
+  redaction = session->redaction_head;
+  if (redaction == NULL)
+    return;
+
+  session->redaction_head = redaction->next;
+  if (session->redaction_head == NULL)
+    session->redaction_tail = NULL;
+  free_redaction(redaction);
+}
+
+static int redaction_is_expired(const struct ptyterm_session *session,
+                                const struct ptyterm_redaction *redaction,
+                                time_t now) {
+  if (redaction->data == NULL)
+    return 0;
+  if (redaction->expires_at != 0 && now >= redaction->expires_at)
+    return 1;
+  if (session->total_output_bytes >= redaction->expire_output_offset)
+    return 1;
+  return 0;
+}
+
+static int any_redaction_is_expired(const struct ptyterm_session *session,
+                                    time_t now) {
+  struct ptyterm_redaction *redaction;
+
+  for (redaction = session->redaction_head; redaction != NULL;
+       redaction = redaction->next) {
+    if (redaction_is_expired(session, redaction, now))
+      return 1;
+  }
+  return 0;
+}
+
+static void mask_redaction_hold(struct ptyterm_session *session,
+                                size_t mask_continuation_size) {
+  char *mask;
+  size_t hold_size;
+
+  hold_size = session->redaction_hold_size;
+  if (hold_size == 0)
+    return;
+
+  mask = malloc(hold_size);
+  if (mask == NULL)
+    return;
+  memset(mask, '*', hold_size);
+  append_output(session, mask, hold_size);
+  ptyterm_screen_feed(&session->screen, mask, hold_size);
+  if (session->client_fd >= 0) {
+    if (append_pending_output(session, mask, hold_size) == -1 ||
+        flush_pending_data(session->client_fd, session->pending_output,
+                           &session->pending_output_size) == -1) {
+      close_attached_client(session);
+    }
+  }
+  clear_sensitive_memory(session->redaction_hold, hold_size);
+  session->redaction_hold_size = 0;
+  session->redaction_hold_expires_at = 0;
+  queue_redaction_mask_continuation(session, mask_continuation_size);
+  clear_sensitive_memory(mask, hold_size);
+  free(mask);
+}
+
+static int hold_matches_unexpired_redaction(
+    const struct ptyterm_session *session, time_t now) {
+  struct ptyterm_redaction *redaction;
+
+  for (redaction = session->redaction_head; redaction != NULL;
+       redaction = redaction->next) {
+    if (!redaction_is_expired(session, redaction, now) &&
+        redaction_matches_hold(session, redaction)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static size_t expired_hold_continuation_size(
+    const struct ptyterm_session *session, time_t now) {
+  struct ptyterm_redaction *redaction;
+  size_t continuation_size;
+
+  continuation_size = 0;
+  for (redaction = session->redaction_head; redaction != NULL;
+       redaction = redaction->next) {
+    if (redaction_is_expired(session, redaction, now) &&
+        redaction_matches_hold(session, redaction) &&
+        redaction->size - session->redaction_hold_size > continuation_size) {
+      continuation_size = redaction->size - session->redaction_hold_size;
+    }
+  }
+  return continuation_size;
+}
+
+static size_t hold_continuation_size(
+    const struct ptyterm_session *session) {
+  struct ptyterm_redaction *redaction;
+  size_t continuation_size;
+
+  continuation_size = 0;
+  for (redaction = session->redaction_head; redaction != NULL;
+       redaction = redaction->next) {
+    if (redaction_matches_hold(session, redaction) &&
+        redaction->size - session->redaction_hold_size > continuation_size) {
+      continuation_size = redaction->size - session->redaction_hold_size;
+    }
+  }
+  return continuation_size;
+}
+
+static void expire_redaction_hold(struct ptyterm_session *session, time_t now) {
+  size_t continuation_size;
+
+  if (session->redaction_hold_size == 0)
+    return;
+
+  if (any_redaction_is_expired(session, now) &&
+      !hold_matches_unexpired_redaction(session, now)) {
+    continuation_size = expired_hold_continuation_size(session, now);
+    if (continuation_size > 0)
+      mask_redaction_hold(session, continuation_size);
+    return;
+  }
+
+  if (session->redaction_hold_expires_at != 0 &&
+      now >= session->redaction_hold_expires_at) {
+    continuation_size = hold_continuation_size(session);
+    if (continuation_size > 0)
+      mask_redaction_hold(session, continuation_size);
+  }
+}
+
+static void expire_redactions(struct ptyterm_session *session, time_t now) {
+  struct ptyterm_redaction *redaction;
+
+  expire_redaction_hold(session, now);
+
+  for (redaction = session->redaction_head; redaction != NULL;
+       redaction = redaction->next) {
+    if (redaction_is_expired(session, redaction, now))
+      discard_redaction_plaintext(redaction);
+  }
+}
+
+static void clear_redactions(struct ptyterm_session *session) {
+  while (session->redaction_head != NULL)
+    pop_redaction(session);
+  if (session->redaction_hold != NULL) {
+    clear_sensitive_memory(session->redaction_hold,
+                           session->redaction_hold_capacity);
+    free(session->redaction_hold);
+    session->redaction_hold = NULL;
+  }
+  session->redaction_hold_size = 0;
+  session->redaction_hold_capacity = 0;
+  session->redaction_hold_expires_at = 0;
+  session->redaction_mask_remaining = 0;
+}
+
+static void set_redaction_expiry(struct ptyterm_session *session,
+                                 struct ptyterm_redaction *redaction,
+                                 time_t now) {
+  redaction->expires_at = now + PTYTERM_REDACTION_TTL_SECONDS;
+  if (session->total_output_bytes >
+      UINT64_MAX - PTYTERM_REDACTION_OUTPUT_WINDOW) {
+    redaction->expire_output_offset = UINT64_MAX;
+  } else {
+    redaction->expire_output_offset =
+        session->total_output_bytes + PTYTERM_REDACTION_OUTPUT_WINDOW;
+  }
+}
+
+static int state_has_pending_redactions(
+    const struct ptyterm_daemon_state *state) {
+  size_t i;
+
+  for (i = 0; i < state->session_count; ++i) {
+    struct ptyterm_redaction *redaction;
+
+    if (state->sessions[i].redaction_hold_size > 0)
+      return 1;
+    for (redaction = state->sessions[i].redaction_head; redaction != NULL;
+         redaction = redaction->next) {
+      if (redaction->data != NULL)
+        return 1;
+    }
+  }
+  return 0;
+}
+
+static void expire_state_redactions(struct ptyterm_daemon_state *state,
+                                    time_t now) {
+  size_t i;
+
+  for (i = 0; i < state->session_count; ++i)
+    expire_redactions(&state->sessions[i], now);
+}
+
+static int ensure_redaction_hold_capacity(struct ptyterm_session *session,
+                                          size_t capacity) {
+  char *new_hold;
+
+  if (session->redaction_hold_capacity >= capacity)
+    return 0;
+
+  new_hold = malloc(capacity);
+  if (new_hold == NULL)
+    return -1;
+  if (session->redaction_hold_size > 0)
+    memcpy(new_hold, session->redaction_hold, session->redaction_hold_size);
+  if (session->redaction_hold != NULL) {
+    clear_sensitive_memory(session->redaction_hold,
+                           session->redaction_hold_capacity);
+    free(session->redaction_hold);
+  }
+  session->redaction_hold = new_hold;
+  session->redaction_hold_capacity = capacity;
+  return 0;
+}
+
+static int append_redacted_output(char *output, size_t output_capacity,
+                                  size_t *output_size, const char *data,
+                                  size_t data_size) {
+  if (data_size == 0)
+    return 0;
+  if (*output_size > output_capacity ||
+      data_size > output_capacity - *output_size) {
+    errno = ENOBUFS;
+    return -1;
+  }
+  memcpy(output + *output_size, data, data_size);
+  *output_size += data_size;
+  return 0;
+}
+
+static int redaction_has_longer_prefix(struct ptyterm_session *session,
+                                       const char *data, size_t data_size) {
+  struct ptyterm_redaction *redaction;
+
+  for (redaction = session->redaction_head; redaction != NULL;
+       redaction = redaction->next) {
+    if (redaction->size > data_size &&
+        redaction_prefix_matches(redaction, data, data_size)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static size_t longest_pending_redaction_suffix_prefix(
+    struct ptyterm_session *session, const char *buffer, size_t buffer_size) {
+  struct ptyterm_redaction *redaction;
+  size_t keep;
+
+  keep = 0;
+  for (redaction = session->redaction_head; redaction != NULL;
+       redaction = redaction->next) {
+    size_t candidate;
+
+    candidate = buffer_size < redaction->size ? buffer_size : redaction->size;
+    while (candidate > keep) {
+      if (redaction_prefix_matches(redaction, buffer + buffer_size - candidate,
+                                   candidate)) {
+        keep = candidate;
+        break;
+      }
+      --candidate;
+    }
+  }
+  return keep;
+}
+
+static struct ptyterm_redaction *find_redaction_match(
+    struct ptyterm_session *session, const char *buffer, size_t buffer_size,
+    size_t *match_offset_out) {
+  struct ptyterm_redaction *best;
+  size_t best_offset;
+  size_t candidate;
+
+  best = NULL;
+  best_offset = 0;
+  for (candidate = 0; candidate < buffer_size; ++candidate) {
+    struct ptyterm_redaction *redaction;
+
+    for (redaction = session->redaction_head; redaction != NULL;
+         redaction = redaction->next) {
+      if (redaction->size > buffer_size - candidate)
+        continue;
+      if (!redaction_prefix_matches(redaction, buffer + candidate,
+                                    redaction->size))
+        continue;
+      if (candidate + redaction->size == buffer_size &&
+          redaction_has_longer_prefix(session, buffer + candidate,
+                                      redaction->size)) {
+        continue;
+      }
+      if (best == NULL || candidate < best_offset ||
+          (candidate == best_offset && redaction->size > best->size)) {
+        best = redaction;
+        best_offset = candidate;
+      }
+    }
+  }
+  if (best != NULL)
+    *match_offset_out = best_offset;
+  return best;
+}
+
+static void discard_redaction_hold_prefix(struct ptyterm_session *session,
+                                          size_t discard_size) {
+  size_t remaining_size;
+
+  if (discard_size == 0)
+    return;
+
+  remaining_size = session->redaction_hold_size - discard_size;
+  if (remaining_size > 0)
+    memmove(session->redaction_hold,
+            session->redaction_hold + discard_size, remaining_size);
+  clear_sensitive_memory(session->redaction_hold + remaining_size,
+                         discard_size);
+  session->redaction_hold_size = remaining_size;
+}
+
+static int emit_redaction_hold_prefix(struct ptyterm_session *session,
+                                      char *output, size_t output_capacity,
+                                      size_t *output_size,
+                                      size_t emit_size) {
+  if (append_redacted_output(output, output_capacity, output_size,
+                             session->redaction_hold, emit_size) == -1) {
+    return -1;
+  }
+  discard_redaction_hold_prefix(session, emit_size);
+  return 0;
+}
+
+static int emit_redaction_mask(const struct ptyterm_redaction *redaction,
+                               char *output, size_t output_capacity,
+                               size_t *output_size) {
+  if (*output_size > output_capacity ||
+      redaction->size > output_capacity - *output_size) {
+    errno = ENOBUFS;
+    return -1;
+  }
+  memset(output + *output_size, '*', redaction->size);
+  *output_size += redaction->size;
+  return 0;
+}
+
+static int flush_redaction_hold(struct ptyterm_session *session, char *output,
+                                size_t output_capacity, size_t *output_size) {
+  for (;;) {
+    struct ptyterm_redaction *match;
+    size_t match_offset;
+    size_t keep;
+    size_t emit_size;
+
+    if (session->redaction_hold_size == 0)
+      return 0;
+
+    match = find_redaction_match(session, session->redaction_hold,
+                                 session->redaction_hold_size,
+                                 &match_offset);
+    if (match != NULL) {
+      if (emit_redaction_hold_prefix(session, output, output_capacity,
+                                     output_size, match_offset) == -1) {
+        return -1;
+      }
+      if (emit_redaction_mask(match, output, output_capacity,
+                              output_size) == -1) {
+        return -1;
+      }
+      discard_redaction_hold_prefix(session, match->size);
+      continue;
+    }
+
+    if (session->redaction_head == NULL) {
+      return emit_redaction_hold_prefix(session, output, output_capacity,
+                                        output_size,
+                                        session->redaction_hold_size);
+    }
+
+    keep = longest_pending_redaction_suffix_prefix(
+        session, session->redaction_hold, session->redaction_hold_size);
+    emit_size = session->redaction_hold_size - keep;
+    if (emit_size == 0)
+      return 0;
+    if (emit_redaction_hold_prefix(session, output, output_capacity,
+                                   output_size, emit_size) == -1) {
+      return -1;
+    }
+  }
+}
+
+static int redact_session_output(struct ptyterm_session *session,
+                                 const char *input, size_t input_size,
+                                 char *output, size_t output_capacity,
+                                 size_t *output_size_out) {
+  size_t input_offset;
+  size_t output_size;
+
+  output_size = 0;
+  for (input_offset = 0; input_offset < input_size; ++input_offset) {
+    if (session->redaction_mask_remaining > 0) {
+      if (append_redacted_output(output, output_capacity, &output_size,
+                                 "*", 1) == -1) {
+        return -1;
+      }
+      --session->redaction_mask_remaining;
+      continue;
+    }
+    if (ensure_redaction_hold_capacity(session,
+                                       session->redaction_hold_size + 1) ==
+        -1) {
+      return -1;
+    }
+    session->redaction_hold[session->redaction_hold_size++] =
+        input[input_offset];
+    if (flush_redaction_hold(session, output, output_capacity,
+                             &output_size) == -1) {
+      return -1;
+    }
+  }
+
+  if (flush_redaction_hold(session, output, output_capacity,
+                           &output_size) == -1) {
+    return -1;
+  }
+
+  if (session->redaction_hold_size > 0) {
+    session->redaction_hold_expires_at =
+        time(NULL) + PTYTERM_REDACTION_HOLD_SECONDS;
+  } else {
+    session->redaction_hold_expires_at = 0;
+  }
+
+  *output_size_out = output_size;
+  return 0;
 }
 
 static void append_output(struct ptyterm_session *session, const char *buffer,
@@ -682,15 +1350,49 @@ static void drain_session_output(struct ptyterm_session *session) {
 
   size = read(session->master_fd, buffer, sizeof(buffer));
   if (size > 0) {
-    append_output(session, buffer, (size_t)size);
-    ptyterm_screen_feed(&session->screen, buffer, (size_t)size);
+    char *output;
+    char *redacted;
+    size_t output_size;
+    size_t redacted_capacity;
+
+    expire_redactions(session, time(NULL));
+    output = buffer;
+    output_size = (size_t)size;
+    redacted = NULL;
+    redacted_capacity = 0;
+    if (session->redaction_head != NULL ||
+        session->redaction_hold_size > 0) {
+      redacted_capacity = session->redaction_hold_size + (size_t)size;
+      redacted = malloc(redacted_capacity == 0 ? 1 : redacted_capacity);
+      if (redacted == NULL) {
+        clear_sensitive_memory(buffer, (size_t)size);
+        return;
+      }
+      if (redact_session_output(session, buffer, (size_t)size, redacted,
+                                redacted_capacity, &output_size) == -1) {
+        clear_sensitive_memory(buffer, (size_t)size);
+        clear_sensitive_memory(redacted, redacted_capacity);
+        free(redacted);
+        return;
+      }
+      output = redacted;
+    }
+
+    append_output(session, output, output_size);
+    ptyterm_screen_feed(&session->screen, output, output_size);
     if (session->client_fd >= 0) {
-      if (append_pending_output(session, buffer, (size_t)size) == -1 ||
+      if (append_pending_output(session, output, output_size) == -1 ||
           flush_pending_data(session->client_fd, session->pending_output,
                              &session->pending_output_size) == -1) {
         close_attached_client(session);
       }
     }
+    clear_sensitive_memory(buffer, (size_t)size);
+    if (redacted != NULL) {
+      clear_sensitive_memory(redacted, redacted_capacity);
+      free(redacted);
+    }
+    expire_redactions(session, time(NULL));
     return;
   }
 
@@ -752,6 +1454,7 @@ static void cleanup_state(struct ptyterm_daemon_state *state) {
       close(state->sessions[i].client_fd);
     free(state->sessions[i].pending_input);
     free(state->sessions[i].pending_output);
+    clear_redactions(&state->sessions[i]);
     if (state->sessions[i].state != PTYTERM_SESSION_EXITED &&
         state->sessions[i].child_pid > 0) {
       kill(state->sessions[i].child_pid, SIGTERM);
@@ -957,24 +1660,54 @@ static int send_send_response(int client_fd, struct ptyterm_session *session,
 
 static int handle_send_request(int client_fd, struct ptyterm_daemon_state *state,
                                const void *payload, size_t payload_size) {
+  const struct ptyterm_send_request_v1 *legacy_request;
   const struct ptyterm_send_request *request;
   struct ptyterm_session *session;
+  struct ptyterm_redaction *redaction;
   const char *data;
+  int32_t session_id;
+  uint32_t data_size;
+  uint32_t flags;
+  uint32_t redact_size;
+  size_t request_size;
   ssize_t sent_bytes;
   uint64_t queue_offset;
 
-  if (payload_size < sizeof(*request)) {
+  if (payload_size < sizeof(*legacy_request)) {
     errno = EPROTO;
     return -1;
   }
 
-  request = (const struct ptyterm_send_request *)payload;
-  if (payload_size != sizeof(*request) + request->data_size) {
+  request = NULL;
+  legacy_request = (const struct ptyterm_send_request_v1 *)payload;
+  session_id = legacy_request->session_id;
+  data_size = legacy_request->data_size;
+  flags = 0;
+  redact_size = 0;
+  request_size = sizeof(*legacy_request);
+  if (payload_size >= sizeof(*request)) {
+    request = (const struct ptyterm_send_request *)payload;
+    if (payload_size == sizeof(*request) + request->data_size) {
+      session_id = request->session_id;
+      data_size = request->data_size;
+      flags = request->flags;
+      redact_size = request->redact_size;
+      request_size = sizeof(*request);
+    }
+  }
+  if (payload_size != request_size + data_size) {
+    errno = EPROTO;
+    return -1;
+  }
+  if ((flags & ~PTYTERM_SEND_FLAG_REDACT_ECHO) != 0 ||
+      redact_size > data_size ||
+      ((flags & PTYTERM_SEND_FLAG_REDACT_ECHO) == 0 &&
+       redact_size != 0)) {
     errno = EPROTO;
     return -1;
   }
 
-  session = (struct ptyterm_session *)find_session(state, request->session_id);
+  session = (struct ptyterm_session *)find_session(state, session_id);
   if (session == NULL) {
     errno = ENOENT;
     return -1;
@@ -984,21 +1717,44 @@ static int handle_send_request(int client_fd, struct ptyterm_daemon_state *state
     return -1;
   }
 
-  data = (const char *)(request + 1);
+  data = (const char *)payload + request_size;
+  redaction = NULL;
+  if ((flags & PTYTERM_SEND_FLAG_REDACT_ECHO) != 0 && redact_size > 0) {
+    redaction = create_redaction(data, redact_size);
+    if (redaction == NULL)
+      return -1;
+  }
+
   queue_offset = session->send_stream_offset;
-  sent_bytes = write(session->master_fd, data, request->data_size);
+  sent_bytes = write(session->master_fd, data, data_size);
   if (sent_bytes == -1) {
+    free_redaction(redaction);
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      return send_send_response(client_fd, session, request->data_size, 0, 1,
+      return send_send_response(client_fd, session, data_size, 0, 1,
                                 "would_block", queue_offset);
     }
     return -1;
   }
 
-  return send_send_response(client_fd, session, request->data_size,
+  if (redaction != NULL) {
+    if ((size_t)sent_bytes < redaction->size) {
+      clear_sensitive_memory(redaction->data + (size_t)sent_bytes,
+                             redaction->size - (size_t)sent_bytes);
+      redaction->size = (size_t)sent_bytes;
+    }
+    if (redaction->size == 0)
+      free_redaction(redaction);
+    else {
+      expire_redactions(session, time(NULL));
+      set_redaction_expiry(session, redaction, time(NULL));
+      append_redaction(session, redaction);
+    }
+  }
+
+  return send_send_response(client_fd, session, data_size,
                             (uint32_t)sent_bytes,
-                            sent_bytes < (ssize_t)request->data_size, 
-                            sent_bytes < (ssize_t)request->data_size ?
+                            sent_bytes < (ssize_t)data_size,
+                            sent_bytes < (ssize_t)data_size ?
                                 "would_block" : "ok",
                             queue_offset);
 }
@@ -1327,11 +2083,14 @@ static int handle_client(int client_fd, struct ptyterm_daemon_state *state) {
     return 0;
   case PTYTERM_MESSAGE_SEND_REQUEST:
     if (handle_send_request(client_fd, state, payload, (size_t)payload_size) == -1) {
+      clear_sensitive_memory(payload, (size_t)payload_size);
       if (errno == ENOENT) {
         send_error_response(client_fd, errno, "session not found");
       } else {
         send_error_response(client_fd, errno, strerror(errno));
       }
+    } else {
+      clear_sensitive_memory(payload, (size_t)payload_size);
     }
     return 0;
   case PTYTERM_MESSAGE_RECV_REQUEST:
@@ -1413,6 +2172,7 @@ int main(int argc, char *const argv[]) {
   char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
 
   memset(&state, 0, sizeof(state));
+  init_redaction_hash_keys();
   setlocale(LC_ALL, "");
   for (;;) {
     int c, optindex;
@@ -1502,9 +2262,19 @@ int main(int argc, char *const argv[]) {
   while (!stop_requested) {
     fd_set rfds;
     fd_set wfds;
+    struct timeval timeout;
+    struct timeval *timeout_ptr;
     int maxfd;
     size_t i;
     int client_fd;
+
+    expire_state_redactions(&state, time(NULL));
+    timeout_ptr = NULL;
+    if (state_has_pending_redactions(&state)) {
+      timeout.tv_sec = 1;
+      timeout.tv_usec = 0;
+      timeout_ptr = &timeout;
+    }
 
     FD_ZERO(&rfds);
     FD_ZERO(&wfds);
@@ -1531,12 +2301,13 @@ int main(int argc, char *const argv[]) {
       }
     }
 
-    if (select(maxfd + 1, &rfds, &wfds, NULL, NULL) == -1) {
+    if (select(maxfd + 1, &rfds, &wfds, NULL, timeout_ptr) == -1) {
       if (errno == EINTR)
         continue;
       perror("select");
       exit(EXIT_FAILURE);
     }
+    expire_state_redactions(&state, time(NULL));
 
     for (i = 0; i < state.session_count; ++i) {
       if (state.sessions[i].master_fd >= 0 && state.sessions[i].pending_input_size > 0 &&

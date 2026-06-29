@@ -55,6 +55,7 @@ static void restore_termios_handler(void);
 static void attach_size_changed(int sig);
 static int parse_status_format(const char *value);
 static int parse_help_format(const char *value);
+static int parse_send_eol(const char *value);
 static int parse_screen_selector(const char *value);
 static int parse_wait_predicate(const char *value);
 static int parse_duration_ms(const char *value, uint64_t *duration_ms_out);
@@ -95,6 +96,13 @@ enum ptyterm_recv_control_mode {
   PTYTERM_RECV_CONTROL_WITH,
 };
 
+enum ptyterm_send_eol {
+  PTYTERM_SEND_EOL_NONE = 0,
+  PTYTERM_SEND_EOL_LF,
+  PTYTERM_SEND_EOL_CR,
+  PTYTERM_SEND_EOL_CRLF,
+};
+
 enum ptyterm_filter_mode {
   PTYTERM_FILTER_MODE_NONE = 0,
   PTYTERM_FILTER_MODE_ESCAPE,
@@ -108,6 +116,10 @@ enum ptyterm_wait_predicate {
   PTYTERM_WAIT_PREDICATE_SHELL_RETURNED,
   PTYTERM_WAIT_PREDICATE_SESSION_EXITED,
   PTYTERM_WAIT_PREDICATE_CURSOR_CHANGED,
+};
+
+enum {
+  PTYTERM_SEND_REQUEST_PAYLOAD_MAX = 4096,
 };
 
 static int set_nonblocking(int fd) {
@@ -134,6 +146,18 @@ static int parse_help_format(const char *value) {
     return PTYTERM_HELP_FORMAT_TEXT;
   if (strcmp(value, "yaml") == 0)
     return PTYTERM_HELP_FORMAT_YAML;
+  return -1;
+}
+
+static int parse_send_eol(const char *value) {
+  if (strcmp(value, "none") == 0)
+    return PTYTERM_SEND_EOL_NONE;
+  if (strcmp(value, "lf") == 0)
+    return PTYTERM_SEND_EOL_LF;
+  if (strcmp(value, "cr") == 0)
+    return PTYTERM_SEND_EOL_CR;
+  if (strcmp(value, "crlf") == 0)
+    return PTYTERM_SEND_EOL_CRLF;
   return -1;
 }
 
@@ -266,6 +290,10 @@ static void print_management_examples(FILE *out, const char *program_name) {
   fprintf(out, "  %s --create -- /bin/sh -c 'echo hello; sleep 30'\n",
           program_name);
   fprintf(out, "  %s --session=1 --send='echo hello\\n'\n", program_name);
+  fprintf(out, "  secret-provider ROUTER_PASSWORD | %s --session=1 --send-stdin --send-eol=cr --redact-sent\n",
+          program_name);
+  fprintf(out, "  secdat get ROUTER_PASSWORD --stdout | %s --session=1 --send-stdin --send-eol=cr --redact-sent\n",
+          program_name);
   fprintf(out, "  %s --session=1 --recv\n", program_name);
   fprintf(out, "  %s --session=1 --snapshot\n", program_name);
   fprintf(out, "  %s --session=1 --view\n", program_name);
@@ -303,6 +331,9 @@ static void print_text_help(FILE *out, const char *program_name) {
   fprintf(out, "  -L, --list          : list daemon-managed sessions\n");
   fprintf(out, "  -B, --buffer-info   : show buffer state for one session\n");
   fprintf(out, "      --send=DATA     : send decoded bytes to one session\n");
+  fprintf(out, "      --send-stdin    : send bytes read from stdin to one session\n");
+  fprintf(out, "      --send-eol=none|lf|cr|crlf : append a line ending after --send-stdin bytes\n");
+  fprintf(out, "      --redact-sent   : redact bytes sent by --send-stdin from echoed output\n");
   fprintf(out, "      --recv          : receive buffered output from one session\n");
   fprintf(out, "      --snapshot      : show a readable terminal snapshot for one session\n");
   fprintf(out, "      --view          : open a scrollable full-screen terminal snapshot viewer\n");
@@ -330,6 +361,10 @@ static void print_text_help(FILE *out, const char *program_name) {
   fprintf(out, "      --help-format=text|yaml : print help in the selected format\n");
   fprintf(out, "\n");
   print_management_examples(out, program_name);
+  fprintf(out, "Integration notes:\n");
+  fprintf(out, "  secdat can be an optional stdin secret provider; ptyterm remains the PTY/session transport.\n");
+  fprintf(out, "  The tools are loosely coupled through stdin/stdout and do not require each other.\n");
+  fprintf(out, "\n");
   print_help_discovery(out, program_name);
 }
 
@@ -431,6 +466,22 @@ static void print_yaml_help(FILE *out, const char *program_name) {
   fprintf(out, "      argument: DATA\n");
   fprintf(out, "      requires: [--session]\n");
   fprintf(out, "      description: Send decoded bytes to one session.\n");
+  fprintf(out, "    - long: --send-stdin\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      requires: [--session]\n");
+  fprintf(out, "      description: Send bytes read from stdin to one session.\n");
+  fprintf(out, "    - long: --send-eol\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: none|lf|cr|crlf\n");
+  fprintf(out, "      default: none\n");
+  fprintf(out, "      requires: [--send-stdin]\n");
+  fprintf(out, "      description: Append a line ending after bytes read by --send-stdin.\n");
+  fprintf(out, "    - long: --redact-sent\n");
+  fprintf(out, "      short: null\n");
+  fprintf(out, "      argument: none\n");
+  fprintf(out, "      requires: [--send-stdin]\n");
+  fprintf(out, "      description: Redact bytes sent by --send-stdin from echoed session output.\n");
   fprintf(out, "    - long: --recv\n");
   fprintf(out, "      short: null\n");
   fprintf(out, "      argument: none\n");
@@ -516,22 +567,29 @@ static void print_yaml_help(FILE *out, const char *program_name) {
   fprintf(out, "  - description: Create a managed session\n");
   fprintf(out, "    command: \"%s --create -- /bin/sh -c 'echo hello; sleep 30'\"\n",
           program_name);
-    fprintf(out, "  - description: Send input to one managed session\n");
-    fprintf(out, "    command: \"%s --session=1 --send='echo hello\\n'\"\n",
+  fprintf(out, "  - description: Send input to one managed session\n");
+  fprintf(out, "    command: \"%s --session=1 --send='echo hello\\n'\"\n",
       program_name);
-    fprintf(out, "  - description: Receive buffered output from one managed session\n");
-    fprintf(out, "    command: \"%s --session=1 --recv\"\n", program_name);
-    fprintf(out, "  - description: Show a terminal snapshot for one managed session\n");
-    fprintf(out, "    command: \"%s --session=1 --snapshot\"\n", program_name);
-    fprintf(out, "  - description: Open a terminal snapshot viewer for one managed session\n");
-    fprintf(out, "    command: \"%s --session=1 --view\"\n", program_name);
-        fprintf(out, "  - description: Wait for a terminal state change and print the resolving snapshot\n");
-        fprintf(out, "    command: \"%s --session=1 --wait-state=snapshot-changed --wait-timeout=2s\"\n",
+  fprintf(out, "  - description: Send a provider-supplied secret without exposing the secret in argv\n");
+  fprintf(out, "    command: \"secret-provider ROUTER_PASSWORD | %s --session=1 --send-stdin --send-eol=cr --redact-sent\"\n",
+      program_name);
+  fprintf(out, "  - description: Use secdat as an optional stdin secret provider for ptyterm\n");
+  fprintf(out, "    command: \"secdat get ROUTER_PASSWORD --stdout | %s --session=1 --send-stdin --send-eol=cr --redact-sent\"\n",
+      program_name);
+  fprintf(out, "  - description: Receive buffered output from one managed session\n");
+  fprintf(out, "    command: \"%s --session=1 --recv\"\n", program_name);
+  fprintf(out, "  - description: Show a terminal snapshot for one managed session\n");
+  fprintf(out, "    command: \"%s --session=1 --snapshot\"\n", program_name);
+  fprintf(out, "  - description: Open a terminal snapshot viewer for one managed session\n");
+  fprintf(out, "    command: \"%s --session=1 --view\"\n", program_name);
+  fprintf(out, "  - description: Wait for a terminal state change and print the resolving snapshot\n");
+  fprintf(out, "    command: \"%s --session=1 --wait-state=snapshot-changed --wait-timeout=2s\"\n",
           program_name);
   fprintf(out, "notes:\n");
   fprintf(out, "  - Exactly one management operation may be selected per invocation.\n");
   fprintf(out, "  - Management operations cannot be combined with standalone run output redirection except attach.\n");
   fprintf(out, "  - Status output formatting is controlled separately with --status-format=text|kv.\n");
+  fprintf(out, "  - \"secdat integration is optional: secdat can provide bytes on stdout while ptyterm transports them to a managed PTY session.\"\n");
 }
 
 static void print_help(FILE *out, const char *program_name, int help_format) {
@@ -1761,6 +1819,16 @@ static size_t decode_send_data(const char *input, char *output, size_t output_si
   return decoded_size;
 }
 
+static void clear_sensitive_memory(void *buffer, size_t size) {
+  volatile unsigned char *cursor;
+
+  cursor = (volatile unsigned char *)buffer;
+  while (size > 0) {
+    *cursor++ = 0;
+    --size;
+  }
+}
+
 static int write_all(int fd, const void *buffer, size_t size) {
   const char *cursor;
 
@@ -1877,12 +1945,15 @@ static int write_recv_payload_escaped(const char *data, uint32_t size) {
   return format_byte_notation(stdout, data, size, 1);
 }
 
-static int read_all_stdin(char **buffer_out, size_t *buffer_size_out) {
+static int read_all_stdin(char **buffer_out, size_t *buffer_size_out,
+                          const char *context_name, size_t max_size) {
   char *buffer;
   size_t buffer_size;
   size_t buffer_capacity;
 
   buffer_capacity = 4096;
+  if (max_size > 0 && max_size < buffer_capacity)
+    buffer_capacity = max_size + 1;
   buffer_size = 0;
   buffer = (char *)malloc(buffer_capacity + 1);
   if (buffer == NULL) {
@@ -1899,6 +1970,7 @@ static int read_all_stdin(char **buffer_out, size_t *buffer_size_out) {
       if (errno == EINTR)
         continue;
       perror("read");
+      clear_sensitive_memory(buffer, buffer_size);
       free(buffer);
       return EXIT_FAILURE;
     }
@@ -1906,21 +1978,36 @@ static int read_all_stdin(char **buffer_out, size_t *buffer_size_out) {
       break;
 
     buffer_size += (size_t)chunk_size;
+    if (max_size > 0 && buffer_size > max_size) {
+      fprintf(stderr, "stdin too large for %s\n", context_name);
+      clear_sensitive_memory(buffer, buffer_size);
+      free(buffer);
+      return EXIT_FAILURE;
+    }
     if (buffer_size == buffer_capacity) {
       char *new_buffer;
+      size_t new_capacity;
 
       if (buffer_capacity > (((size_t)-1) / 2) - 1) {
-        fprintf(stderr, "stdin too large for --unescape\n");
+        fprintf(stderr, "stdin too large for %s\n", context_name);
+        clear_sensitive_memory(buffer, buffer_size);
         free(buffer);
         return EXIT_FAILURE;
       }
-      buffer_capacity *= 2;
-      new_buffer = (char *)realloc(buffer, buffer_capacity + 1);
+      new_capacity = buffer_capacity * 2;
+      if (max_size > 0 && new_capacity > max_size + 1)
+        new_capacity = max_size + 1;
+      buffer_capacity = new_capacity;
+      new_buffer = (char *)malloc(buffer_capacity + 1);
       if (new_buffer == NULL) {
-        perror("realloc");
+        perror("malloc");
+        clear_sensitive_memory(buffer, buffer_size);
         free(buffer);
         return EXIT_FAILURE;
       }
+      memcpy(new_buffer, buffer, buffer_size);
+      clear_sensitive_memory(buffer, buffer_size);
+      free(buffer);
       buffer = new_buffer;
     }
   }
@@ -1965,7 +2052,7 @@ static int run_unescape_filter(void) {
   size_t decoded_size;
   int result;
 
-  if (read_all_stdin(&buffer, &buffer_size) != EXIT_SUCCESS)
+  if (read_all_stdin(&buffer, &buffer_size, "--unescape", 0) != EXIT_SUCCESS)
     return EXIT_FAILURE;
 
   decoded = (char *)malloc(buffer_size == 0 ? 1 : buffer_size);
@@ -1988,43 +2075,76 @@ static int run_unescape_filter(void) {
   return result == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-static int run_send_client(const char *socket_path, int session_id,
-                           const char *send_data) {
+static int run_send_bytes_client(const char *socket_path, int session_id,
+                                 const char *send_data, size_t data_size,
+                                 uint32_t flags, uint32_t redact_size) {
   char default_socket_path[PTYTERM_SOCKET_PATH_MAX];
-  char payload[4096];
-  char decoded[2048];
+  char response_payload[4096];
+  char *request_payload;
   struct ptyterm_send_request *request;
+  struct ptyterm_send_request_v1 *legacy_request;
   struct ptyterm_message_header header;
   const struct ptyterm_send_response *response;
-  size_t data_size;
+  size_t request_header_size;
+  size_t request_size;
   ssize_t payload_size;
   int fd;
+  int use_extended_request;
 
-  data_size = decode_send_data(send_data, decoded, sizeof(decoded));
-  if (sizeof(*request) + data_size > sizeof(payload)) {
+  use_extended_request = flags != 0 || redact_size != 0;
+  request_header_size = use_extended_request ?
+      sizeof(*request) : sizeof(*legacy_request);
+  if ((flags & ~PTYTERM_SEND_FLAG_REDACT_ECHO) != 0 ||
+      (flags == 0 && redact_size != 0) || redact_size > data_size ||
+      data_size > UINT32_MAX ||
+      request_header_size + data_size > PTYTERM_SEND_REQUEST_PAYLOAD_MAX) {
     fprintf(stderr, "send request too large\n");
     return EXIT_FAILURE;
   }
 
-  request = (struct ptyterm_send_request *)payload;
-  request->session_id = session_id;
-  request->data_size = (uint32_t)data_size;
-  memcpy(request + 1, decoded, data_size);
+  request_size = request_header_size + data_size;
+  request_payload = malloc(request_size == 0 ? 1 : request_size);
+  if (request_payload == NULL) {
+    perror("malloc");
+    return EXIT_FAILURE;
+  }
+
+  if (use_extended_request) {
+    request = (struct ptyterm_send_request *)request_payload;
+    request->session_id = session_id;
+    request->data_size = (uint32_t)data_size;
+    request->flags = flags;
+    request->redact_size = redact_size;
+    memcpy(request + 1, send_data, data_size);
+  } else {
+    legacy_request = (struct ptyterm_send_request_v1 *)request_payload;
+    legacy_request->session_id = session_id;
+    legacy_request->data_size = (uint32_t)data_size;
+    memcpy(legacy_request + 1, send_data, data_size);
+  }
 
   fd = connect_daemon_socket(socket_path, default_socket_path, 1);
   if (fd == -1) {
     perror(socket_path);
+    clear_sensitive_memory(request_payload, request_size);
+    free(request_payload);
     return EXIT_FAILURE;
   }
 
-  if (ptyterm_send_message(fd, PTYTERM_MESSAGE_SEND_REQUEST, payload,
-                           (uint32_t)(sizeof(*request) + data_size)) == -1) {
+  if (ptyterm_send_message(fd, PTYTERM_MESSAGE_SEND_REQUEST, request_payload,
+                           (uint32_t)request_size) == -1) {
     perror("send");
     close(fd);
+    clear_sensitive_memory(request_payload, request_size);
+    free(request_payload);
     return EXIT_FAILURE;
   }
 
-  payload_size = ptyterm_recv_message(fd, &header, payload, sizeof(payload));
+  clear_sensitive_memory(request_payload, request_size);
+  free(request_payload);
+
+  payload_size = ptyterm_recv_message(fd, &header, response_payload,
+                                      sizeof(response_payload));
   if (payload_size == -1) {
     perror("recv");
     close(fd);
@@ -2035,7 +2155,7 @@ static int run_send_client(const char *socket_path, int session_id,
   if (header.type == PTYTERM_MESSAGE_ERROR) {
     const struct ptyterm_error_response *error_response;
 
-    error_response = (const struct ptyterm_error_response *)payload;
+    error_response = (const struct ptyterm_error_response *)response_payload;
     fprintf(stderr, "%s\n", error_response->message);
     return EXIT_FAILURE;
   }
@@ -2045,12 +2165,116 @@ static int run_send_client(const char *socket_path, int session_id,
     return EXIT_FAILURE;
   }
 
-  response = (const struct ptyterm_send_response *)payload;
+  response = (const struct ptyterm_send_response *)response_payload;
   printf("sent %u/%u bytes; %u unsent; resume-offset=%u; blocked=%s; reason=%s\n",
          response->sent_bytes, response->requested_bytes,
          response->unsent_bytes, response->resume_offset,
          response->blocked ? "yes" : "no", response->reason);
   return response->unsent_bytes == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+static int run_send_client(const char *socket_path, int session_id,
+                           const char *send_data) {
+  char decoded[2048];
+  size_t data_size;
+  int result;
+
+  data_size = decode_send_data(send_data, decoded, sizeof(decoded));
+  result = run_send_bytes_client(socket_path, session_id, decoded, data_size, 0,
+                                 0);
+  clear_sensitive_memory(decoded, sizeof(decoded));
+  return result;
+}
+
+static const char *send_eol_bytes(int send_eol, size_t *eol_size_out) {
+  switch (send_eol) {
+  case PTYTERM_SEND_EOL_LF:
+    *eol_size_out = 1;
+    return "\n";
+  case PTYTERM_SEND_EOL_CR:
+    *eol_size_out = 1;
+    return "\r";
+  case PTYTERM_SEND_EOL_CRLF:
+    *eol_size_out = 2;
+    return "\r\n";
+  default:
+    *eol_size_out = 0;
+    return "";
+  }
+}
+
+static size_t stdin_redaction_size(const char *buffer, size_t buffer_size) {
+  if (buffer_size > 0 && buffer[buffer_size - 1] == '\n') {
+    --buffer_size;
+    if (buffer_size > 0 && buffer[buffer_size - 1] == '\r')
+      --buffer_size;
+  } else if (buffer_size > 0 && buffer[buffer_size - 1] == '\r') {
+    --buffer_size;
+  }
+  return buffer_size;
+}
+
+static int run_send_stdin_client(const char *socket_path, int session_id,
+                                 int send_eol, int redact_sent) {
+  char *buffer;
+  char *new_buffer;
+  const char *eol;
+  size_t buffer_size;
+  size_t secret_size;
+  size_t eol_size;
+  uint32_t flags;
+  int result;
+  size_t request_header_size;
+  size_t stdin_max_size;
+
+  eol = send_eol_bytes(send_eol, &eol_size);
+  request_header_size = redact_sent ? sizeof(struct ptyterm_send_request) :
+                                      sizeof(struct ptyterm_send_request_v1);
+  if (request_header_size + eol_size >
+      PTYTERM_SEND_REQUEST_PAYLOAD_MAX) {
+    fprintf(stderr, "send request too large\n");
+    return EXIT_FAILURE;
+  }
+  stdin_max_size = PTYTERM_SEND_REQUEST_PAYLOAD_MAX -
+                   request_header_size - eol_size;
+
+  if (read_all_stdin(&buffer, &buffer_size, "--send-stdin",
+                     stdin_max_size) != EXIT_SUCCESS)
+    return EXIT_FAILURE;
+
+  secret_size = redact_sent ? stdin_redaction_size(buffer, buffer_size) :
+                              buffer_size;
+  if (buffer_size > SIZE_MAX - eol_size - 1 || secret_size > UINT32_MAX) {
+    fprintf(stderr, "send request too large\n");
+    clear_sensitive_memory(buffer, buffer_size);
+    free(buffer);
+    return EXIT_FAILURE;
+  }
+
+  if (eol_size > 0) {
+    new_buffer = malloc(buffer_size + eol_size + 1);
+    if (new_buffer == NULL) {
+      perror("malloc");
+      clear_sensitive_memory(buffer, buffer_size);
+      free(buffer);
+      return EXIT_FAILURE;
+    }
+    memcpy(new_buffer, buffer, buffer_size);
+    clear_sensitive_memory(buffer, buffer_size);
+    free(buffer);
+    buffer = new_buffer;
+    memcpy(buffer + buffer_size, eol, eol_size);
+    buffer_size += eol_size;
+    buffer[buffer_size] = '\0';
+  }
+
+  flags = redact_sent ? PTYTERM_SEND_FLAG_REDACT_ECHO : 0;
+  result = run_send_bytes_client(socket_path, session_id, buffer, buffer_size,
+                                 flags,
+                                 redact_sent ? (uint32_t)secret_size : 0);
+  clear_sensitive_memory(buffer, buffer_size);
+  free(buffer);
+  return result;
 }
 
 static int request_recv_client(const char *socket_path, int session_id,
@@ -2877,6 +3101,10 @@ int main(int argc, char *const argv[]) {
   int status_format = PTYTERM_STATUS_FORMAT_KV;
   int status_format_explicit = 0;
   const char *send_data = NULL;
+  int send_stdin_requested = 0;
+  int send_eol = PTYTERM_SEND_EOL_NONE;
+  int send_eol_explicit = 0;
+  int redact_sent = 0;
   uint32_t recv_size = 4096;
   int session_id = PTYTERM_SESSION_ALL;
 
@@ -2908,6 +3136,9 @@ int main(int argc, char *const argv[]) {
       OPT_DAEMON_STOP,
       OPT_HELP_FORMAT,
       OPT_STATUS_FORMAT,
+      OPT_SEND_STDIN,
+      OPT_SEND_EOL,
+      OPT_REDACT_SENT,
     };
 
     char *p;
@@ -2923,6 +3154,9 @@ int main(int argc, char *const argv[]) {
                {"detach", no_argument, NULL, 'D'},
                        {"resize", no_argument, NULL, 'R'},
                        {"send", required_argument, NULL, OPT_SEND},
+                       {"send-stdin", no_argument, NULL, OPT_SEND_STDIN},
+                       {"send-eol", required_argument, NULL, OPT_SEND_EOL},
+                       {"redact-sent", no_argument, NULL, OPT_REDACT_SENT},
                        {"escape", no_argument, NULL, OPT_ESCAPE},
                        {"unescape", no_argument, NULL, OPT_UNESCAPE},
                        {"recv", no_argument, NULL, OPT_RECV},
@@ -2997,6 +3231,18 @@ int main(int argc, char *const argv[]) {
       break;
     case OPT_SEND:
       send_data = optarg;
+      break;
+    case OPT_SEND_STDIN:
+      send_stdin_requested = 1;
+      break;
+    case OPT_SEND_EOL:
+      send_eol = parse_send_eol(optarg);
+      if (send_eol < 0)
+        return usage_error(argv[0], "unsupported send-eol: %s", optarg);
+      send_eol_explicit = 1;
+      break;
+    case OPT_REDACT_SENT:
+      redact_sent = 1;
       break;
     case OPT_ESCAPE:
       filter_mode = PTYTERM_FILTER_MODE_ESCAPE;
@@ -3123,6 +3369,10 @@ int main(int argc, char *const argv[]) {
     return usage_error(argv[0], "--recv-control requires --recv");
   if ((recv_timeout_ms != 0 || recv_until != NULL) && !recv_requested)
     return usage_error(argv[0], "recv wait options require --recv");
+  if (send_eol_explicit && !send_stdin_requested)
+    return usage_error(argv[0], "--send-eol requires --send-stdin");
+  if (redact_sent && !send_stdin_requested)
+    return usage_error(argv[0], "--redact-sent requires --send-stdin");
   if (filter_mode != PTYTERM_FILTER_MODE_NONE && (ifile || ofile || afile))
     return usage_error(argv[0],
                        "filter operations do not support file redirection options");
@@ -3139,7 +3389,7 @@ int main(int argc, char *const argv[]) {
         (snapshot_requested != 0) +
         (view_requested != 0) +
         (wait_predicate != PTYTERM_WAIT_PREDICATE_NONE) +
-          (send_data != NULL) >
+          (send_data != NULL) + (send_stdin_requested != 0) >
       1) {
     return usage_error(argv[0], "select only one management operation");
   }
@@ -3151,7 +3401,7 @@ int main(int argc, char *const argv[]) {
       (recv_requested != 0) + (snapshot_requested != 0) +
       (view_requested != 0) +
       (wait_predicate != PTYTERM_WAIT_PREDICATE_NONE) +
-      (send_data != NULL) +
+      (send_data != NULL) + (send_stdin_requested != 0) +
        (filter_mode != PTYTERM_FILTER_MODE_NONE)) > 1) {
     return usage_error(argv[0],
                        "select only one management or filter operation");
@@ -3163,6 +3413,7 @@ int main(int argc, char *const argv[]) {
       !resize_requested && !buffer_info_requested && !recv_requested &&
       !snapshot_requested && !view_requested &&
       wait_predicate == PTYTERM_WAIT_PREDICATE_NONE && send_data == NULL &&
+      !send_stdin_requested &&
       (session_id != PTYTERM_SESSION_ALL || socket_path != NULL ||
        status_format_explicit)) {
     return usage_error(argv[0],
@@ -3190,7 +3441,8 @@ int main(int argc, char *const argv[]) {
       resize_requested ||
       list_requested || buffer_info_requested ||
       recv_requested || snapshot_requested || view_requested ||
-      wait_predicate != PTYTERM_WAIT_PREDICATE_NONE || send_data != NULL) {
+      wait_predicate != PTYTERM_WAIT_PREDICATE_NONE || send_data != NULL ||
+      send_stdin_requested) {
     if ((ifile || ofile || afile ||
          ((opt_cols > 0 || opt_lines > 0) && !resize_requested)) &&
         !attach_requested) {
@@ -3234,6 +3486,9 @@ int main(int argc, char *const argv[]) {
     }
     if (send_data != NULL)
       return run_send_client(socket_path, session_id, send_data);
+    if (send_stdin_requested)
+      return run_send_stdin_client(socket_path, session_id, send_eol,
+                                   redact_sent);
     if (snapshot_requested)
       return run_snapshot_client(socket_path, session_id,
                                  (uint32_t)screen_selector,
