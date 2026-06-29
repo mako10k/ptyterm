@@ -16,6 +16,7 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include "cli-help.h"
 #include "config.h"
 
 static int open_pty() {
@@ -43,6 +44,32 @@ static void be_session_leader() {
   }
 }
 
+static const char *const ptywrap_usage_lines[] = {
+    "%s -V",
+    "%s -h",
+    "%s [-d] [ENVNAME=ENVVALUE ..] [cmd [arg ..]]",
+    NULL,
+};
+
+static const struct ptyterm_cli_help_option ptywrap_options[] = {
+    {"--version", "-V", "none", NULL, NULL, NULL, "  -V, --version",
+     "print version"},
+    {"--help", "-h", "none", NULL, NULL, NULL, "  -h, --help",
+     "print this usage"},
+    {"--daemon", "-d", "none", NULL, NULL, NULL, "  -d, --daemon",
+     "daemon mode"},
+    {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+};
+
+static void print_ptywrap_help(const char *program_name) {
+  printf("%s\n", PACKAGE_STRING);
+  printf("\n");
+  ptyterm_cli_help_print_usage_section(stdout, program_name,
+                                       ptywrap_usage_lines);
+  ptyterm_cli_help_print_option_section(stdout, "Options", ptywrap_options);
+  printf("\n");
+}
+
 int main(int argc, char *const argv[]) {
   int mfd;
   pid_t pid;
@@ -63,21 +90,10 @@ int main(int argc, char *const argv[]) {
 
     switch (c) {
     case 'h':
+      print_ptywrap_help(argv[0]);
+      exit(EXIT_SUCCESS);
     case 'V':
       printf("%s\n", PACKAGE_STRING);
-      if (c != 'h')
-        exit(EXIT_SUCCESS);
-      printf("\n");
-      printf("Usage:\n");
-      printf("  %s -V\n", argv[0]);
-      printf("  %s -h\n", argv[0]);
-      printf("  %s [-d] [ENVNAME=ENVVALUE ..] [cmd [arg ..]]\n", argv[0]);
-      printf("\n");
-      printf("Options:\n");
-      printf("  -V, --version : print version\n");
-      printf("  -h, --help    : print this usage\n");
-      printf("  -d, --daemon  : daemon mode\n");
-      printf("\n");
       exit(EXIT_SUCCESS);
     case 'd':
       opt_daemon = 1;

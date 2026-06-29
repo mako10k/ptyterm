@@ -5,6 +5,7 @@
 #endif
 
 #include "ptyterm-control.h"
+#include "ptyterm-help.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -37,11 +38,6 @@ enum ptyterm_status_format {
   PTYTERM_STATUS_FORMAT_KV = 2,
 };
 
-enum ptyterm_help_format {
-  PTYTERM_HELP_FORMAT_TEXT = 1,
-  PTYTERM_HELP_FORMAT_YAML = 2,
-};
-
 static int set_nonblocking(int fd);
 static int resolve_socket_path(const char *socket_path,
                                char *default_socket_path,
@@ -62,7 +58,6 @@ static int parse_duration_ms(const char *value, uint64_t *duration_ms_out);
 static int monotonic_time_ms(uint64_t *time_ms_out);
 static int run_view_client(const char *socket_path, int session_id,
                            uint32_t screen_selector);
-static void print_help(FILE *out, const char *program_name, int help_format);
 static int usage_error(const char *program_name, const char *fmt, ...);
 static void print_create_status(const struct ptyterm_create_response *response,
                                 int status_format,
@@ -277,328 +272,6 @@ static void print_recv_status_line(uint32_t returned_bytes, uint64_t start_offse
           (unsigned long long)end_offset,
           (unsigned long long)next_recv_offset,
           truncated ? "yes" : "no", reason);
-}
-
-static void print_help_discovery(FILE *out, const char *program_name) {
-  fprintf(out, "Structured help:\n");
-  fprintf(out, "  %s --help-format=yaml\n", program_name);
-  fprintf(out, "\n");
-}
-
-static void print_management_examples(FILE *out, const char *program_name) {
-  fprintf(out, "Examples:\n");
-  fprintf(out, "  %s --create -- /bin/sh -c 'echo hello; sleep 30'\n",
-          program_name);
-  fprintf(out, "  %s --session=1 --send='echo hello\\n'\n", program_name);
-  fprintf(out, "  secret-provider ROUTER_PASSWORD | %s --session=1 --send-stdin --send-eol=cr --redact-sent\n",
-          program_name);
-  fprintf(out, "  secdat get ROUTER_PASSWORD --stdout | %s --session=1 --send-stdin --send-eol=cr --redact-sent\n",
-          program_name);
-  fprintf(out, "  %s --session=1 --recv\n", program_name);
-  fprintf(out, "  %s --session=1 --snapshot\n", program_name);
-  fprintf(out, "  %s --session=1 --view\n", program_name);
-  fprintf(out, "  %s --session=1 --wait-state=snapshot-changed --wait-timeout=2s\n",
-          program_name);
-  fprintf(out, "  %s --help\n", program_name);
-  fprintf(out, "\n");
-}
-
-static void print_text_help(FILE *out, const char *program_name) {
-  fprintf(out, "%s\n", PACKAGE_STRING);
-  fprintf(out, "\n");
-  fprintf(out, "Usage:\n");
-  fprintf(out, "  %s [options] [ENVNAME=ENVVALUE ..] [cmd [arg ..]]\n",
-          program_name);
-  fprintf(out, "\n");
-  fprintf(out, "Run options:\n");
-  fprintf(out, "  -c, --cols=N  : set columns\n");
-  fprintf(out, "  -l, --lines=N : set lines\n");
-  fprintf(out,
-          "  -i, --stdin=FILE : read from FILE instead of stdin (alias: --input)\n");
-  fprintf(out,
-          "  -o, --stdout=FILE : write to FILE instead of stdout (alias: --output)\n");
-  fprintf(out,
-          "  -a, --stdout-append=FILE : append output to FILE instead of stdout (alias: --append)\n");
-  fprintf(out, "\n");
-  fprintf(out, "Management options:\n");
-  fprintf(out, "  -A, --attach        : attach to one daemon-managed session\n");
-  fprintf(out, "  -C, --create        : create a daemon-managed session\n");
-  fprintf(out, "      --daemon-status : report whether the daemon is running\n");
-  fprintf(out, "      --daemon-stop   : request graceful daemon shutdown\n");
-  fprintf(out, "      --status-format=text|kv : select structured status output\n");
-  fprintf(out, "  -D, --detach        : detach one attached daemon-managed session\n");
-  fprintf(out, "  -R, --resize        : resize one daemon-managed session\n");
-  fprintf(out, "  -L, --list          : list daemon-managed sessions\n");
-  fprintf(out, "  -B, --buffer-info   : show buffer state for one session\n");
-  fprintf(out, "      --send=DATA     : send decoded bytes to one session\n");
-  fprintf(out, "      --send-stdin    : send bytes read from stdin to one session\n");
-  fprintf(out, "      --send-eol=none|lf|cr|crlf : append a line ending after --send-stdin bytes\n");
-  fprintf(out, "      --redact-sent   : redact bytes sent by --send-stdin from echoed output\n");
-  fprintf(out, "      --recv          : receive buffered output from one session\n");
-  fprintf(out, "      --snapshot      : show a readable terminal snapshot for one session\n");
-  fprintf(out, "      --view          : open a scrollable full-screen terminal snapshot viewer\n");
-  fprintf(out, "      --wait-state=PREDICATE : wait for a state predicate and print the resolving snapshot\n");
-  fprintf(out, "      --wait-timeout=DURATION : maximum wait time for --wait-state (ms|s)\n");
-  fprintf(out, "      --screen=active|main|alt : select which screen snapshot to inspect (default: active)\n");
-  fprintf(out, "      --recv-format=raw|escaped : select recv payload rendering (default: escaped on TTY stdout, raw otherwise)\n");
-  fprintf(out, "      --recv-control=without|with : drop control characters from recv payload unless explicitly kept\n");
-  fprintf(out, "      --recv-size=N   : maximum bytes returned by --recv\n");
-  fprintf(out, "      --recv-timeout=DURATION : wait up to DURATION (ms|s) for recv\n");
-  fprintf(out, "      --recv-until=STRING : wait until unread output contains STRING\n");
-  fprintf(out, "      --peek          : inspect buffered output without advancing recv\n");
-  fprintf(out, "      --session=ID    : select one session for management operations\n");
-  fprintf(out, "      --rows=N        : rows for --resize (alias: --lines)\n");
-  fprintf(out, "      --cols=N        : cols for --resize\n");
-  fprintf(out, "  -s, --socket=PATH   : override daemon control socket path\n");
-  fprintf(out, "\n");
-  fprintf(out, "Filter options:\n");
-  fprintf(out, "      --escape        : read stdin and write escaped bytes to stdout\n");
-  fprintf(out, "      --unescape      : read escaped stdin and write decoded bytes to stdout\n");
-  fprintf(out, "\n");
-  fprintf(out, "Common options:\n");
-  fprintf(out, "  -V, --version             : print version and exit\n");
-  fprintf(out, "  -h, --help                : print this usage and exit\n");
-  fprintf(out, "      --help-format=text|yaml : print help in the selected format\n");
-  fprintf(out, "\n");
-  print_management_examples(out, program_name);
-  fprintf(out, "Integration notes:\n");
-  fprintf(out, "  secdat can be an optional stdin secret provider; ptyterm remains the PTY/session transport.\n");
-  fprintf(out, "  The tools are loosely coupled through stdin/stdout and do not require each other.\n");
-  fprintf(out, "\n");
-  print_help_discovery(out, program_name);
-}
-
-static void print_yaml_help(FILE *out, const char *program_name) {
-  fprintf(out, "program: ptyterm\n");
-  fprintf(out, "version: \"%s\"\n", PACKAGE_VERSION);
-  fprintf(out, "summary: Interactive PTY wrapper and daemon session client\n");
-  fprintf(out, "default_mode: run\n");
-  fprintf(out, "discovery:\n");
-  fprintf(out, "  text_help: \"%s --help\"\n", program_name);
-  fprintf(out, "  structured_help: \"%s --help-format=yaml\"\n",
-          program_name);
-  fprintf(out, "usage:\n");
-  fprintf(out, "  - \"%s [options] [ENVNAME=ENVVALUE ..] [cmd [arg ..]]\"\n",
-          program_name);
-  fprintf(out, "sections:\n");
-  fprintf(out, "  common_options:\n");
-  fprintf(out, "    - long: --help\n");
-  fprintf(out, "      short: -h\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      description: Print text help and exit.\n");
-  fprintf(out, "    - long: --help-format\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: text|yaml\n");
-  fprintf(out, "      default: text\n");
-  fprintf(out, "      description: Print help in the selected format and exit.\n");
-  fprintf(out, "    - long: --version\n");
-  fprintf(out, "      short: -V\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      description: Print version and exit.\n");
-  fprintf(out, "    - long: --socket\n");
-  fprintf(out, "      short: -s\n");
-  fprintf(out, "      argument: PATH\n");
-  fprintf(out, "      description: Override daemon control socket path.\n");
-  fprintf(out, "  run_options:\n");
-  fprintf(out, "    - long: --stdin\n");
-  fprintf(out, "      short: -i\n");
-  fprintf(out, "      aliases: [--input]\n");
-  fprintf(out, "      argument: FILE\n");
-  fprintf(out, "      description: Read from FILE instead of stdin.\n");
-  fprintf(out, "    - long: --stdout\n");
-  fprintf(out, "      short: -o\n");
-  fprintf(out, "      aliases: [--output]\n");
-  fprintf(out, "      argument: FILE\n");
-  fprintf(out, "      description: Write to FILE instead of stdout.\n");
-  fprintf(out, "    - long: --stdout-append\n");
-  fprintf(out, "      short: -a\n");
-  fprintf(out, "      aliases: [--append]\n");
-  fprintf(out, "      argument: FILE\n");
-  fprintf(out, "      description: Append output to FILE instead of stdout.\n");
-  fprintf(out, "    - long: --cols\n");
-  fprintf(out, "      short: -c\n");
-  fprintf(out, "      argument: N\n");
-  fprintf(out, "      description: Set initial PTY columns.\n");
-  fprintf(out, "    - long: --lines\n");
-  fprintf(out, "      short: -l\n");
-  fprintf(out, "      aliases: [--rows]\n");
-  fprintf(out, "      argument: N\n");
-  fprintf(out, "      description: Set initial PTY lines.\n");
-  fprintf(out, "  management_operations:\n");
-  fprintf(out, "    - long: --attach\n");
-  fprintf(out, "      short: -A\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      requires: [--session]\n");
-  fprintf(out, "      description: Attach to one daemon-managed session.\n");
-  fprintf(out, "    - long: --create\n");
-  fprintf(out, "      short: -C\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      description: Create a daemon-managed session.\n");
-  fprintf(out, "    - long: --daemon-status\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      description: Report whether the daemon is running.\n");
-  fprintf(out, "    - long: --daemon-stop\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      description: Request graceful daemon shutdown.\n");
-  fprintf(out, "    - long: --detach\n");
-  fprintf(out, "      short: -D\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      requires: [--session]\n");
-  fprintf(out, "      description: Detach one attached daemon-managed session.\n");
-  fprintf(out, "    - long: --resize\n");
-  fprintf(out, "      short: -R\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      requires: [--session, --rows, --cols]\n");
-  fprintf(out, "      description: Resize one daemon-managed session.\n");
-  fprintf(out, "    - long: --list\n");
-  fprintf(out, "      short: -L\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      description: List daemon-managed sessions.\n");
-  fprintf(out, "    - long: --buffer-info\n");
-  fprintf(out, "      short: -B\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      requires: [--session]\n");
-  fprintf(out, "      description: Show buffer state for one session.\n");
-  fprintf(out, "    - long: --send\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: DATA\n");
-  fprintf(out, "      requires: [--session]\n");
-  fprintf(out, "      description: Send decoded bytes to one session.\n");
-  fprintf(out, "    - long: --send-stdin\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      requires: [--session]\n");
-  fprintf(out, "      description: Send bytes read from stdin to one session.\n");
-  fprintf(out, "    - long: --send-eol\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: none|lf|cr|crlf\n");
-  fprintf(out, "      default: none\n");
-  fprintf(out, "      requires: [--send-stdin]\n");
-  fprintf(out, "      description: Append a line ending after bytes read by --send-stdin.\n");
-  fprintf(out, "    - long: --redact-sent\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      requires: [--send-stdin]\n");
-  fprintf(out, "      description: Redact bytes sent by --send-stdin from echoed session output.\n");
-  fprintf(out, "    - long: --recv\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      requires: [--session]\n");
-  fprintf(out, "      description: Receive buffered output from one session.\n");
-  fprintf(out, "    - long: --snapshot\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      requires: [--session]\n");
-  fprintf(out, "      description: Show a readable terminal snapshot for one session.\n");
-  fprintf(out, "    - long: --view\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      requires: [--session]\n");
-  fprintf(out, "      description: Open a scrollable full-screen terminal snapshot viewer.\n");
-  fprintf(out, "    - long: --wait-state\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: snapshot-changed|foreground-changed|shell-returned|session-exited|cursor-changed\n");
-  fprintf(out, "      requires: [--session, --wait-timeout]\n");
-  fprintf(out, "      description: Wait for the requested state predicate and print the resolving snapshot.\n");
-  fprintf(out, "    - long: --wait-timeout\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: DURATION\n");
-  fprintf(out, "      requires: [--wait-state]\n");
-  fprintf(out, "      description: Maximum wait time for the state predicate.\n");
-  fprintf(out, "    - long: --screen\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: active|main|alt\n");
-  fprintf(out, "      default: active\n");
-  fprintf(out, "      requires: [--snapshot|--view|--wait-state]\n");
-  fprintf(out, "      description: Select which terminal screen snapshot to inspect.\n");
-  fprintf(out, "    - long: --recv-format\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: raw|escaped\n");
-  fprintf(out, "      requires: [--recv]\n");
-  fprintf(out, "      default: escaped on TTY stdout, raw otherwise\n");
-  fprintf(out, "      description: Select exact-byte or terminal-safe recv payload rendering.\n");
-  fprintf(out, "    - long: --recv-control\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: without|with\n");
-  fprintf(out, "      default: without\n");
-  fprintf(out, "      requires: [--recv]\n");
-  fprintf(out, "      description: Drop control characters from recv payload unless explicitly kept.\n");
-  fprintf(out, "  filter_operations:\n");
-  fprintf(out, "    - long: --escape\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      description: Read stdin and write canonical escaped byte notation to stdout.\n");
-  fprintf(out, "    - long: --unescape\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      description: Read escaped byte notation from stdin and write decoded bytes to stdout.\n");
-  fprintf(out, "    - long: --peek\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: none\n");
-  fprintf(out, "      requires: [--recv]\n");
-  fprintf(out, "      description: Read buffered output without advancing the recv cursor.\n");
-  fprintf(out, "    - long: --recv-size\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: N\n");
-  fprintf(out, "      requires: [--recv]\n");
-  fprintf(out, "      default: 4096\n");
-  fprintf(out, "      description: Maximum bytes returned by recv.\n");
-  fprintf(out, "    - long: --recv-timeout\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: DURATION\n");
-  fprintf(out, "      requires: [--recv]\n");
-  fprintf(out, "      description: Wait up to the requested duration for recv data or a pattern match.\n");
-  fprintf(out, "    - long: --recv-until\n");
-  fprintf(out, "      short: null\n");
-  fprintf(out, "      argument: STRING\n");
-  fprintf(out, "      requires: [--recv]\n");
-  fprintf(out, "      description: Return once unread output contains the fixed string.\n");
-  fprintf(out, "    - long: --session\n");
-  fprintf(out, "      short: -S\n");
-  fprintf(out, "      argument: ID\n");
-  fprintf(out, "      description: Select one session for management operations.\n");
-  fprintf(out, "examples:\n");
-  fprintf(out, "  - description: Print text help\n");
-  fprintf(out, "    command: \"%s --help\"\n", program_name);
-  fprintf(out, "  - description: Print structured help\n");
-  fprintf(out, "    command: \"%s --help-format=yaml\"\n", program_name);
-  fprintf(out, "  - description: Create a managed session\n");
-  fprintf(out, "    command: \"%s --create -- /bin/sh -c 'echo hello; sleep 30'\"\n",
-          program_name);
-  fprintf(out, "  - description: Send input to one managed session\n");
-  fprintf(out, "    command: \"%s --session=1 --send='echo hello\\n'\"\n",
-      program_name);
-  fprintf(out, "  - description: Send a provider-supplied secret without exposing the secret in argv\n");
-  fprintf(out, "    command: \"secret-provider ROUTER_PASSWORD | %s --session=1 --send-stdin --send-eol=cr --redact-sent\"\n",
-      program_name);
-  fprintf(out, "  - description: Use secdat as an optional stdin secret provider for ptyterm\n");
-  fprintf(out, "    command: \"secdat get ROUTER_PASSWORD --stdout | %s --session=1 --send-stdin --send-eol=cr --redact-sent\"\n",
-      program_name);
-  fprintf(out, "  - description: Receive buffered output from one managed session\n");
-  fprintf(out, "    command: \"%s --session=1 --recv\"\n", program_name);
-  fprintf(out, "  - description: Show a terminal snapshot for one managed session\n");
-  fprintf(out, "    command: \"%s --session=1 --snapshot\"\n", program_name);
-  fprintf(out, "  - description: Open a terminal snapshot viewer for one managed session\n");
-  fprintf(out, "    command: \"%s --session=1 --view\"\n", program_name);
-  fprintf(out, "  - description: Wait for a terminal state change and print the resolving snapshot\n");
-  fprintf(out, "    command: \"%s --session=1 --wait-state=snapshot-changed --wait-timeout=2s\"\n",
-          program_name);
-  fprintf(out, "notes:\n");
-  fprintf(out, "  - Exactly one management operation may be selected per invocation.\n");
-  fprintf(out, "  - Management operations cannot be combined with standalone run output redirection except attach.\n");
-  fprintf(out, "  - Status output formatting is controlled separately with --status-format=text|kv.\n");
-  fprintf(out, "  - \"secdat integration is optional: secdat can provide bytes on stdout while ptyterm transports them to a managed PTY session.\"\n");
-}
-
-static void print_help(FILE *out, const char *program_name, int help_format) {
-  if (help_format == PTYTERM_HELP_FORMAT_YAML) {
-    print_yaml_help(out, program_name);
-    return;
-  }
-
-  print_text_help(out, program_name);
 }
 
 static int usage_error(const char *program_name, const char *fmt, ...) {
@@ -3345,7 +3018,7 @@ int main(int argc, char *const argv[]) {
   }
 
   if (help_requested) {
-    print_help(stdout, argv[0], help_format);
+    ptyterm_print_help(stdout, argv[0], help_format);
     return EXIT_SUCCESS;
   }
 

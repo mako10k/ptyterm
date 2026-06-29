@@ -133,7 +133,7 @@ Documentation status
 - `ptytermd`: text help is implemented and README examples below cover daemon startup and configuration.
 - `ptywrap`: text help is implemented and README examples below cover both default and daemon modes.
 - `pbuf`: text help is implemented and README examples below cover the main buffered-copy workflow.
-- `biopen`: no built-in `--help` or `--version` interface is currently implemented; the supported interface is the positional `[PATH]` form described below.
+- `biopen`: text help is implemented and README examples below cover the positional `[PATH]` workflow.
 
 Man-page status
 ---------------

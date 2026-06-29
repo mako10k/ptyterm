@@ -15,7 +15,7 @@ This audit compares the shipped CLI surface with the user-facing documentation i
 - `ptyterm`: README examples exist. Text help and structured YAML help exist. Current wording is aligned with the implemented daemon/session-management surface, including `--peek`, `--recv-timeout`, and `--recv-until`.
 - `ptytermd`: Text help exists. README now includes a daemon startup/configuration example.
 - `ptywrap`: Text help exists. README now includes default and daemon-mode examples.
-- `biopen`: No built-in `--help` or `--version` interface exists. README now documents the supported positional interface explicitly.
+- `biopen`: Text help exists. README documents the supported positional interface explicitly.
 - `pbuf`: Text help exists. README already includes a primary usage example.
 
 ## Man-Page Decision
@@ -44,7 +44,6 @@ These were resolved in the same audit pass.
 
 ## Remaining Gaps
 
-- `biopen` still lacks a self-describing `--help` / `--version` interface.
 - Project man pages remain deferred.
 
 These are known gaps after the audit, not accidental omissions.

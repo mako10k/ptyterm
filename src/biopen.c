@@ -15,6 +15,40 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "cli-help.h"
+
+static const char *const biopen_usage_lines[] = {
+    "%s",
+    "%s PATH",
+    "%s -h",
+    "%s -V",
+    NULL,
+};
+
+static const struct ptyterm_cli_help_option biopen_options[] = {
+    {"--help", "-h", "none", NULL, NULL, NULL, "  -h, --help",
+     "print this usage and exit"},
+    {"--version", "-V", "none", NULL, NULL, NULL, "  -V, --version",
+     "print version and exit"},
+    {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+};
+
+static const char *const biopen_notes[] = {
+    "  Without PATH, biopen uses the controlling terminal from stdin.",
+    "  PATH must name a character device or socket opened read-write.",
+    NULL,
+};
+
+static void print_biopen_help(const char *program_name) {
+  printf("%s\n", PACKAGE_STRING);
+  printf("\n");
+  ptyterm_cli_help_print_usage_section(stdout, program_name,
+                                       biopen_usage_lines);
+  ptyterm_cli_help_print_option_section(stdout, "Options", biopen_options);
+  printf("\n");
+  ptyterm_cli_help_print_note_section(stdout, "Notes", biopen_notes);
+}
+
 int main(int argc, char *const argv[]) {
   int fd, max_fd, fd_count;
   fd_set rfds, wfds;
@@ -27,21 +61,7 @@ int main(int argc, char *const argv[]) {
   setlocale(LC_ALL, "");
   if (argc == 2 &&
       (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
-    printf("%s\n", PACKAGE_STRING);
-    printf("\n");
-    printf("Usage:\n");
-    printf("  %s\n", argv[0]);
-    printf("  %s PATH\n", argv[0]);
-    printf("  %s -h\n", argv[0]);
-    printf("  %s -V\n", argv[0]);
-    printf("\n");
-    printf("Options:\n");
-    printf("  -h, --help    : print this usage and exit\n");
-    printf("  -V, --version : print version and exit\n");
-    printf("\n");
-    printf("Notes:\n");
-    printf("  Without PATH, biopen uses the controlling terminal from stdin.\n");
-    printf("  PATH must name a character device or socket opened read-write.\n");
+    print_biopen_help(argv[0]);
     exit(EXIT_SUCCESS);
   }
   if (argc == 2 &&

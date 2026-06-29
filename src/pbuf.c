@@ -13,6 +13,45 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include "cli-help.h"
+
+static const char *const pbuf_usage_lines[] = {
+    "%s [OPTION]...",
+    NULL,
+};
+
+static const struct ptyterm_cli_help_option pbuf_options[] = {
+    {"--buffer-size", "-b", "SIZE", NULL, NULL, NULL,
+     "  -b, --buffer-size=SIZE", "set buffer size"},
+    {"--version", "-V", "none", NULL, NULL, NULL, "  -V, --version",
+     "print version and exit"},
+    {"--help", "-h", "none", NULL, NULL, NULL, "  -h, --help",
+     "print this usage and exit"},
+    {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+};
+
+static void print_pbuf_help(const char *program_name) {
+  char page_size_line[128];
+
+  ptyterm_cli_help_print_usage_section(stdout, program_name, pbuf_usage_lines);
+  printf("Copy standard input to standard output.\n");
+  printf("\n");
+  ptyterm_cli_help_print_option_section(stdout, "Options", pbuf_options);
+  ptyterm_cli_help_print_detail_line(
+      stdout, "          SIZE is an integer and optional unit (k, m, g, p)");
+  ptyterm_cli_help_print_detail_line(stdout,
+                                     "            k = kibibyte (1024)");
+  ptyterm_cli_help_print_detail_line(stdout,
+                                     "            m = mebibyte (1048576)");
+  ptyterm_cli_help_print_detail_line(stdout,
+                                     "            g = gibibyte (1073741824)");
+  snprintf(page_size_line, sizeof(page_size_line),
+           "            p = pagesize (%ld)", sysconf(_SC_PAGESIZE));
+  ptyterm_cli_help_print_detail_line(stdout, page_size_line);
+  ptyterm_cli_help_print_detail_line(stdout, "            default is 1p");
+  printf("\n");
+}
+
 int pbuf(int ifd, int ofd, size_t bufsize) {
   struct stat ist, ost;
   if (fstat(ifd, &ist) == -1) {
@@ -190,20 +229,7 @@ int main(int argc, char *argv[]) {
              PACKAGE_VERSION);
       return EXIT_SUCCESS;
     case 'h':
-      printf("Usage: pbuf [OPTION]...\n");
-      printf("Copy standard input to standard output.\n");
-      printf("\n");
-      printf("Options:\n");
-      printf("  -b, --buffer-size=SIZE : set buffer size\n");
-      printf("          SIZE is an integer and optional unit (k, m, g, p)\n");
-      printf("            k = kibibyte (1024)\n");
-      printf("            m = mebibyte (1048576)\n");
-      printf("            g = gibibyte (1073741824)\n");
-      printf("            p = pagesize (%ld)\n", sysconf(_SC_PAGESIZE));
-      printf("            default is 1p\n");
-      printf("  -V, --version : print version and exit\n");
-      printf("  -h, --help    : print this usage and exit\n");
-      printf("\n");
+      print_pbuf_help(argv[0]);
       return EXIT_SUCCESS;
     default:
       return EXIT_FAILURE;

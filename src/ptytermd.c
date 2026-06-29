@@ -4,6 +4,7 @@
 #define PACKAGE_STRING "ptytermd"
 #endif
 
+#include "cli-help.h"
 #include "ptyterm-control.h"
 #include "ptyterm-screen.h"
 
@@ -2164,6 +2165,36 @@ static int handle_client(int client_fd, struct ptyterm_daemon_state *state) {
   }
 }
 
+static const char *const ptytermd_usage_lines[] = {
+    "%s [options]",
+    NULL,
+};
+
+static const struct ptyterm_cli_help_option ptytermd_options[] = {
+    {"--socket", "-s", "PATH", NULL, NULL, NULL,
+     "  -s, --socket=PATH", "control socket path"},
+    {"--output-buffer", "-b", "SIZE", "4096", NULL, NULL,
+     "  -b, --output-buffer=SIZE",
+     "per-session output buffer size (default: 4096)"},
+    {"--overflow", "-o", "drop|pause", "drop", NULL, NULL,
+     "  -o, --overflow=drop|pause",
+     "output buffer overflow policy (default: drop)"},
+    {"--version", "-V", "none", NULL, NULL, NULL, "  -V, --version",
+     "print version and exit"},
+    {"--help", "-h", "none", NULL, NULL, NULL, "  -h, --help",
+     "print this usage and exit"},
+    {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+};
+
+static void print_ptytermd_help(const char *program_name) {
+  printf("%s\n", PACKAGE_STRING);
+  printf("\n");
+  ptyterm_cli_help_print_usage_section(stdout, program_name,
+                                       ptytermd_usage_lines);
+  ptyterm_cli_help_print_option_section(stdout, "Options", ptytermd_options);
+  printf("\n");
+}
+
 int main(int argc, char *const argv[]) {
   struct ptyterm_daemon_state state;
   const char *socket_path = NULL;
@@ -2190,23 +2221,10 @@ int main(int argc, char *const argv[]) {
 
     switch (c) {
     case 'h':
+      print_ptytermd_help(argv[0]);
+      exit(EXIT_SUCCESS);
     case 'V':
       printf("%s\n", PACKAGE_STRING);
-      if (c != 'h')
-        exit(EXIT_SUCCESS);
-      printf("\n");
-      printf("Usage:\n");
-      printf("  %s [options]\n", argv[0]);
-      printf("\n");
-      printf("Options:\n");
-      printf("  -s, --socket=PATH          control socket path\n");
-      printf("  -b, --output-buffer=SIZE   per-session output buffer size "
-             "(default: 4096)\n");
-      printf("  -o, --overflow=drop|pause  output buffer overflow policy "
-             "(default: drop)\n");
-      printf("  -V, --version              print version and exit\n");
-      printf("  -h, --help                 print this usage and exit\n");
-      printf("\n");
       exit(EXIT_SUCCESS);
     case 's':
       socket_path = optarg;

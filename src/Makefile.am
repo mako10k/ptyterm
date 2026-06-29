@@ -2,12 +2,12 @@ bin_PROGRAMS = ptyterm ptywrap biopen pbuf ptytermd
 
 AM_CFLAGS = -O2 -Wall -Werror
 
-ptyterm_SOURCES = ptyterm.c ptyterm-control.c
-ptywrap_SOURCES = ptywrap.c
-biopen_SOURCES = biopen.c
-pbuf_SOURCES = pbuf.c
-ptytermd_SOURCES = ptytermd.c ptyterm-control.c ptyterm-screen.c
-noinst_HEADERS = ptyterm-control.h ptyterm-screen.h
+ptyterm_SOURCES = ptyterm.c ptyterm-control.c cli-help.c ptyterm-help.c
+ptywrap_SOURCES = ptywrap.c cli-help.c
+biopen_SOURCES = biopen.c cli-help.c
+pbuf_SOURCES = pbuf.c cli-help.c
+ptytermd_SOURCES = ptytermd.c ptyterm-control.c ptyterm-screen.c cli-help.c
+noinst_HEADERS = cli-help.h ptyterm-control.h ptyterm-help.h ptyterm-screen.h
 
 TESTS = \
 	test-ptyterm-help.sh \
